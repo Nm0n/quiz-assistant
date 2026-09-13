@@ -7,3 +7,5 @@ package = org.quizassistant.quiz
 python_version = 3.11
 
 [android]
+wheel_pyside = 
+wheel_shiboken = 
