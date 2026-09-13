@@ -46,9 +46,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install "PySide6==${PYSIDE_VERSION}"
           pip install "shiboken6==${PYSIDE_VERSION}"
-          pip install packaging
-          pip install jinja2 pkginfo
-          pip list | grep -i -E "pyside|shiboken|packaging"
+          pip install packaging jinja2 pkginfo tqdm
+          pip install buildozer cython virtualenv
+          pip list | grep -i -E "pyside|shiboken|buildozer"
 
       # ============================================================
       # 2. 关键步骤：直接从 Qt 官方镜像下载 Android wheel
@@ -142,14 +142,25 @@ jobs:
       # ============================================================
       - name: Collect APK artifacts
         run: |
+          set -e
           mkdir -p dist
-          find . -type f -name "*.apk" -not -path "./dist/*" -exec cp {} dist/ \;
-          ls -lh dist/
+          echo "搜索 APK 文件..."
+          # 在整个项目目录下搜索 .apk 文件，但排除 dist/ 目录本身
+          find . -type f -name "*.apk" -not -path "./dist/*" | tee apk_list.txt
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: quizassistant-apk-${{ github.sha }}
-          path: dist/*.apk
-          retention-days: 30
-          if-no-files-found: error
+          COUNT=$(wc -l < apk_list.txt)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::未找到任何 APK 产物，请检查 build.log"
+            echo "---- 项目目录结构 ----"
+            find . -maxdepth 3 -type d | head -50
+            echo "---- build.log 末尾 ----"
+            tail -n 80 build.log || true
+            exit 1
+          fi
+
+          while IFS= read -r f; do
+            cp "$f" dist/
+          done < apk_list.txt
+
+          ls -lh dist/
+          echo "共找到 $COUNT 个 APK 文件"
