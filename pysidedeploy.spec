@@ -1,5 +1,5 @@
 [app]
-title = 智能刷题助手
+title = QuizAssistant
 source_file = main.py
 package = org.quizassistant.quiz
 
