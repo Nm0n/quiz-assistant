@@ -11,7 +11,7 @@ on:
 
 env:
   PYTHON_VERSION: '3.11'
-  PYSIDE_VERSION: '6.8.0'
+  PYSIDE_VERSION: '6.8.2'
   ANDROID_SDK_VERSION: '33'
   ANDROID_NDK_VERSION: '25.2.9519653'
   ANDROID_BUILD_TOOLS: '33.0.2'
@@ -39,7 +39,7 @@ jobs:
           java-version: ${{ env.JDK_VERSION }}
 
       # ============================================================
-      # 1. 安装 PySide6 6.8.0
+      # 1. 安装 PySide6（仅用于桌面端工具，Android wheel 单独下载）
       # ============================================================
       - name: Install PySide6 and deploy tools
         run: |
@@ -49,16 +49,22 @@ jobs:
           pip list | grep -i -E "pyside|shiboken"
 
       # ============================================================
-      # 2. 关键步骤：使用 qtpip 下载 Android wheel
+      # 2. 关键步骤：直接从 Qt 官方镜像下载 Android wheel
+      #    使用 wget，完全绕开 qtpip
       # ============================================================
-      - name: Download Android Wheels
+      - name: Download Android Wheels (from Qt official mirror)
         run: |
-          pip install qtpip
           mkdir -p wheels
-          qtpip download PySide6 --android --arch aarch64 -d ./wheels
-          qtpip download shiboken6 --android --arch aarch64 -d ./wheels
+          # PySide6 wheel
+          wget -q --show-progress \
+            "https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
+            -O "wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
+          # shiboken6 wheel
+          wget -q --show-progress \
+            "https://download.qt.io/official_releases/QtForPython/shiboken6/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
+            -O "wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
           echo "下载的 wheel 文件："
-          ls -la wheels/
+          ls -lh wheels/
 
       # ============================================================
       # 3. 配置 Android SDK / NDK
@@ -111,14 +117,13 @@ jobs:
           fi
 
       # ============================================================
-      # 4. 执行打包（关键：手动指定 wheel 和 NDK/SDK 路径）
+      # 4. 执行打包（关键：显式指定 wheel 文件名和 NDK/SDK 路径）
       # ============================================================
       - name: Run pyside6-android-deploy
         run: |
           set -o pipefail
-          # 从下载的 wheel 中提取具体文件名
-          WHEEL_PYSIDE=$(ls wheels/PySide6-*android_aarch64.whl | head -1)
-          WHEEL_SHIBOKEN=$(ls wheels/shiboken6-*android_aarch64.whl | head -1)
+          WHEEL_PYSIDE="wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
+          WHEEL_SHIBOKEN="wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
           echo "使用 PySide wheel: $WHEEL_PYSIDE"
           echo "使用 Shiboken wheel: $WHEEL_SHIBOKEN"
 
