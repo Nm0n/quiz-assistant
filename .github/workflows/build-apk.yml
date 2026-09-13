@@ -1,10 +1,10 @@
 # .github/workflows/build-apk.yml
 # 关键设计：
-#   - 全程使用 JDK 17（cmdline-tools 16.0 要求 JDK 17+）
-#   - 手动下载官方 cmdline-tools，避免 setup-android 的封装副作用
-#   - 用 sed 把 JAXB jar 追加到 sdkmanager 脚本的 CLASSPATH 里
-#     （不用 heredoc，避免 YAML 解析冲突）
-#   - 不使用 JDK 8（avdmanager 是 JDK 17 编译的，JDK 8 跑不起来）
+#   - 全程 JDK 17
+#   - 手动装 cmdline-tools，绕过 setup-android
+#   - sed 注入 JAXB
+#   - 【本次新增】在 $ANDROID_HOME/tools/bin/ 建软链接，
+#     让 p4a / buildozer 能在老路径找到 sdkmanager
 
 name: Build Android APK
 
@@ -23,6 +23,7 @@ env:
   ANDROID_SDK_VERSION: '33'
   ANDROID_NDK_VERSION: '25.2.9519653'
   ANDROID_BUILD_TOOLS: '33.0.2'
+  ANDROID_HOME: /usr/local/lib/android/sdk
 
 jobs:
   build-apk:
@@ -39,9 +40,6 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      # ============================================================
-      # 全局使用 JDK 17
-      # ============================================================
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -54,11 +52,10 @@ jobs:
           java -version
 
       # ============================================================
-      # 手动安装 Android cmdline-tools（绕过 setup-android）
+      # 手动安装 Android cmdline-tools
       # ============================================================
       - name: Manually install Android cmdline-tools
         run: |
-          export ANDROID_HOME=/usr/local/lib/android/sdk
           sudo mkdir -p "$ANDROID_HOME"
           sudo chown -R $USER:$USER "$ANDROID_HOME"
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
@@ -71,22 +68,18 @@ jobs:
           mkdir -p "$ANDROID_HOME/cmdline-tools"
           mv cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
 
-          echo "=== cmdline-tools/latest/lib 内容（前 20 行） ==="
-          ls "$ANDROID_HOME/cmdline-tools/latest/lib/" | head -20
-          echo "=== 查找 JAXB ==="
-          ls "$ANDROID_HOME/cmdline-tools/latest/lib/" | grep -i "jaxb" || echo "!!! JAXB jar 未在 lib 目录中找到 !!!"
+          echo "=== cmdline-tools/latest/lib 里的 JAXB jar ==="
+          ls "$ANDROID_HOME/cmdline-tools/latest/lib/" | grep -i "jaxb" || echo "!!! JAXB 未找到 !!!"
 
       # ============================================================
-      # 关键：用 sed 把 JAXB jar 追加到 sdkmanager 的 CLASSPATH
-      #       不再使用 heredoc，避免 YAML 解析错误
+      # 注入 JAXB 到 sdkmanager 的 CLASSPATH
       # ============================================================
       - name: Ensure JAXB in sdkmanager CLASSPATH
         run: |
-          export ANDROID_HOME=/usr/local/lib/android/sdk
           SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           LIBDIR="$ANDROID_HOME/cmdline-tools/latest/lib"
 
-          echo "=== 修改前 CLASSPATH 行 ==="
+          echo "=== 修改前 CLASSPATH ==="
           grep -n "CLASSPATH" "$SDKMGR" || true
 
           mkdir -p "$LIBDIR"
@@ -96,24 +89,44 @@ jobs:
           wget -q https://repo1.maven.org/maven2/org/glassfish/jaxb/jaxb-core/2.3.0/jaxb-core-2.3.0.jar
           wget -q https://repo1.maven.org/maven2/javax/activation/javax.activation-api/1.2.0/javax.activation-api-1.2.0.jar
 
-          echo "=== lib 目录里的 JAXB jar ==="
-          ls -la "$LIBDIR" | grep -i jaxb || true
-
-          # 若脚本里还没有 jaxb-api-2.3.1，就在 CLASSPATH="... 后插入
           if ! grep -q "jaxb-api-2.3.1" "$SDKMGR"; then
             sed -i "s|^CLASSPATH=\"|CLASSPATH=\"$LIBDIR/jaxb-api-2.3.1.jar:$LIBDIR/jaxb-impl-2.3.1.jar:$LIBDIR/jaxb-core-2.3.0.jar:$LIBDIR/javax.activation-api-1.2.0.jar:|" "$SDKMGR"
-            echo "已在 CLASSPATH 前插入 JAXB jar"
-          else
-            echo "sdkmanager 已引用 jaxb-api-2.3.1，跳过"
           fi
 
-          echo "=== 修改后 CLASSPATH 行 ==="
+          echo "=== 修改后 CLASSPATH ==="
           grep -n "CLASSPATH" "$SDKMGR" || true
+
+      # ============================================================
+      # 【本次新增】为 p4a / buildozer 建老路径的软链接
+      # p4a 硬编码查找 $ANDROID_HOME/tools/bin/sdkmanager
+      # ============================================================
+      - name: Create legacy sdkmanager symlinks
+        run: |
+          echo "创建 legacy tools 路径软链接..."
+
+          mkdir -p "$ANDROID_HOME/tools/bin"
+          mkdir -p "$ANDROID_HOME/tools"
+
+          # 主要软链接：cmdline-tools/latest → tools/bin
+          ln -sf "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "$ANDROID_HOME/tools/bin/sdkmanager"
+          ln -sf "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" "$ANDROID_HOME/tools/bin/avdmanager"
+
+          # 有些工具会去 $ANDROID_HOME/cmdline-tools/bin 找，也一起建
+          mkdir -p "$ANDROID_HOME/cmdline-tools/bin"
+          ln -sf "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "$ANDROID_HOME/cmdline-tools/bin/sdkmanager"
+          ln -sf "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" "$ANDROID_HOME/cmdline-tools/bin/avdmanager"
+
+          echo "=== 验证软链接 ==="
+          ls -la "$ANDROID_HOME/tools/bin/"
+          ls -la "$ANDROID_HOME/cmdline-tools/bin/"
+          echo "=== 通过软链接调用 sdkmanager ==="
+          "$ANDROID_HOME/tools/bin/sdkmanager" --version
 
       - name: Add cmdline-tools to PATH
         run: |
-          echo "/usr/local/lib/android/sdk/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          echo "/usr/local/lib/android/sdk/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/tools/bin" >> "$GITHUB_PATH"
 
       - name: Verify sdkmanager works
         run: |
@@ -134,14 +147,13 @@ jobs:
       - name: Install Android NDK
         run: |
           yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
-          test -d "/usr/local/lib/android/sdk/ndk/${ANDROID_NDK_VERSION}" || (echo "NDK 安装失败" && exit 1)
+          test -d "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" || (echo "NDK 安装失败" && exit 1)
           echo "NDK 已安装"
 
       - name: Export NDK env
         run: |
-          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=/usr/local/lib/android/sdk/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
 
       # ============================================================
       # Python 依赖
@@ -184,6 +196,8 @@ jobs:
           java -version
           echo "======== ANDROID_HOME ========"
           echo "$ANDROID_HOME"
+          echo "=== 通过 tools/bin 访问 sdkmanager ==="
+          ls -la "$ANDROID_HOME/tools/bin/" || true
           echo "============================"
 
           WHEEL_PYSIDE="wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
