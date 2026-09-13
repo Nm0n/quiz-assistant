@@ -82,6 +82,18 @@ jobs:
           pip install aab
           pip list | grep -i -E "pyside|shiboken"
 
+      # ========== 新增步骤：下载 Android 版本的 wheel ==========
+      - name: Download Android Wheels
+        run: |
+          mkdir -p wheels
+          # 使用 qtpip 下载对应架构的 PySide6 和 shiboken6 wheel
+          pip install qtpip
+          qtpip download PySide6 --android --arch aarch64 -d ./wheels
+          qtpip download shiboken6 --android --arch aarch64 -d ./wheels
+          echo "下载的 wheel 文件："
+          ls -la wheels/
+
+
       # ============================================================
       # 5. 缓存 Android SDK / NDK / 下载目录
       #    （大幅缩短重复构建时间）
