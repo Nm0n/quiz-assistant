@@ -46,7 +46,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install "PySide6==${PYSIDE_VERSION}"
           pip install "shiboken6==${PYSIDE_VERSION}"
-          pip list | grep -i -E "pyside|shiboken"
+          pip install packaging
+          pip install jinja2 pkginfo
+          pip list | grep -i -E "pyside|shiboken|packaging"
 
       # ============================================================
       # 2. 关键步骤：直接从 Qt 官方镜像下载 Android wheel
