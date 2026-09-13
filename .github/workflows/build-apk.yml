@@ -1,4 +1,3 @@
-# .github/workflows/build-apk.yml
 name: Build Android APK
 
 on:
@@ -25,39 +24,22 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      # ============================================================
-      # 1. 检出代码
-      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ============================================================
-      # 2. 安装 Python
-      # ============================================================
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Verify Python
-        run: |
-          python --version
-          pip --version
-
-      # ============================================================
-      # 3. 安装 JDK
-      # ============================================================
       - name: Set up JDK ${{ env.JDK_VERSION }}
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: ${{ env.JDK_VERSION }}
 
-      - name: Verify Java
-        run: java -version
-
       # ============================================================
-      # 4. 安装 PySide6（注意：Android 预编译 wheel 从 6.8.0 起才官方提供）
+      # 1. 安装 PySide6 6.8.0
       # ============================================================
       - name: Install PySide6 and deploy tools
         run: |
@@ -67,26 +49,25 @@ jobs:
           pip list | grep -i -E "pyside|shiboken"
 
       # ============================================================
-      # 5. Android SDK 缓存（首次构建 miss 属正常，后续会加速）
+      # 2. 关键步骤：使用 qtpip 下载 Android wheel
       # ============================================================
-      - name: Cache Android SDK
-        id: cache-android-sdk
-        uses: actions/cache@v4
-        with:
-          path: |
-            /usr/local/lib/android/sdk
-            /opt/android-ndk
-          key: android-sdk-${{ env.ANDROID_SDK_VERSION }}-ndk-${{ env.ANDROID_NDK_VERSION }}-v3
+      - name: Download Android Wheels
+        run: |
+          pip install qtpip
+          mkdir -p wheels
+          qtpip download PySide6 --android --arch aarch64 -d ./wheels
+          qtpip download shiboken6 --android --arch aarch64 -d ./wheels
+          echo "下载的 wheel 文件："
+          ls -la wheels/
 
       # ============================================================
-      # 6. 配置 Android SDK（每次都跑，确保 ANDROID_HOME 被设置）
+      # 3. 配置 Android SDK / NDK
       # ============================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Install Android SDK components
         run: |
-          sdkmanager --version
           yes | sdkmanager --install \
             "platform-tools" \
             "platforms;android-${ANDROID_SDK_VERSION}" \
@@ -94,48 +75,29 @@ jobs:
             "cmdline-tools;latest" || true
           yes | sdkmanager --licenses || true
 
-      # ============================================================
-      # 7. 安装 Android NDK（无条件执行，失败则手动下载兜底）
-      # ============================================================
       - name: Install Android NDK
         run: |
-          if command -v sdkmanager >/dev/null 2>&1; then
-            yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}" || true
-          fi
-
-          if [ ! -d "${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" ] && \
-             [ ! -d "/usr/local/lib/android/sdk/ndk/${ANDROID_NDK_VERSION}" ] && \
-             [ ! -d "/opt/android-ndk/android-ndk-r25b" ]; then
-            echo "sdkmanager 未装成 NDK，使用手动下载兜底"
+          yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}" || true
+          if [ ! -d "${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" ]; then
             NDK_ZIP="android-ndk-r25b-linux.zip"
             wget -q "https://dl.google.com/android/repository/${NDK_ZIP}"
             sudo mkdir -p /opt/android-ndk
             sudo unzip -q "${NDK_ZIP}" -d /opt/android-ndk
           fi
 
-      # ============================================================
-      # 8. 探测并导出 ANDROID_HOME / NDK 路径
-      #    找不到 NDK 就立刻失败，避免后面白跑
-      # ============================================================
       - name: Export Android environment variables
         run: |
-          # 确定 ANDROID_HOME
           if [ -z "$ANDROID_HOME" ]; then
             if [ -d "/usr/local/lib/android/sdk" ]; then
               echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
-            elif [ -n "$ANDROID_SDK_ROOT" ]; then
-              echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
             fi
           else
             echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
           fi
 
-          # 探测 NDK
           NDK_CANDIDATE=""
           if [ -d "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" ]; then
             NDK_CANDIDATE="$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}"
-          elif [ -d "/usr/local/lib/android/sdk/ndk/${ANDROID_NDK_VERSION}" ]; then
-            NDK_CANDIDATE="/usr/local/lib/android/sdk/ndk/${ANDROID_NDK_VERSION}"
           elif [ -d "/opt/android-ndk/android-ndk-r25b" ]; then
             NDK_CANDIDATE="/opt/android-ndk/android-ndk-r25b"
           fi
@@ -143,94 +105,40 @@ jobs:
           if [ -n "$NDK_CANDIDATE" ]; then
             echo "ANDROID_NDK_HOME=$NDK_CANDIDATE" >> "$GITHUB_ENV"
             echo "ANDROID_NDK_ROOT=$NDK_CANDIDATE" >> "$GITHUB_ENV"
-            echo "Detected NDK at: $NDK_CANDIDATE"
           else
-            echo "::error::未能探测到 NDK 路径，停止构建"
+            echo "::error::NDK 未找到，停止构建"
             exit 1
           fi
 
       # ============================================================
-      # 9. 诊断：打印实际路径，方便排查
-      # ============================================================
-      - name: Diagnose Android toolchain
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
-          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
-          ls -la "$ANDROID_HOME" || true
-          ls -la "$ANDROID_HOME/ndk" || true
-          ls -la /usr/local/lib/android/sdk/ndk || true
-          ls -la /opt/android-ndk || true
-          which sdkmanager || true
-          python -c "from PySide6 import __version__; print('PySide6', __version__)"
-
-      # ============================================================
-      # 10. 预检：工程结构
-      # ============================================================
-      - name: Sanity check project layout
-        run: |
-          test -f main.py            || (echo "缺少 main.py" && exit 1)
-          test -f pysidedeploy.spec  || (echo "缺少 pysidedeploy.spec" && exit 1)
-          test -d core               || (echo "缺少 core/" && exit 1)
-          test -d qml                || (echo "缺少 qml/" && exit 1)
-          test -f qml/main.qml       || (echo "缺少 qml/main.qml" && exit 1)
-          echo "工程结构检查通过"
-
-      # ============================================================
-      # 11. 执行打包（关键：显式传入 NDK / SDK 路径）
+      # 4. 执行打包（关键：手动指定 wheel 和 NDK/SDK 路径）
       # ============================================================
       - name: Run pyside6-android-deploy
         run: |
           set -o pipefail
+          # 从下载的 wheel 中提取具体文件名
+          WHEEL_PYSIDE=$(ls wheels/PySide6-*android_aarch64.whl | head -1)
+          WHEEL_SHIBOKEN=$(ls wheels/shiboken6-*android_aarch64.whl | head -1)
+          echo "使用 PySide wheel: $WHEEL_PYSIDE"
+          echo "使用 Shiboken wheel: $WHEEL_SHIBOKEN"
+
           pyside6-android-deploy \
             --config-file pysidedeploy.spec \
+            --wheel-pyside "$WHEEL_PYSIDE" \
+            --wheel-shiboken "$WHEEL_SHIBOKEN" \
             --ndk-path "$ANDROID_NDK_HOME" \
             --sdk-path "$ANDROID_HOME" \
             --force 2>&1 | tee build.log
 
       # ============================================================
-      # 12. 收集 APK
+      # 5. 收集 APK
       # ============================================================
       - name: Collect APK artifacts
-        id: collect
         run: |
-          set -e
           mkdir -p dist
-          echo "搜索 APK..."
-          find . -type f -name "*.apk" -not -path "./dist/*" | tee apk_list.txt
-
-          COUNT=$(wc -l < apk_list.txt)
-          if [ "$COUNT" -eq 0 ]; then
-            echo "::error::未找到任何 APK 产物，请检查 build.log"
-            echo "---- build.log 末尾 ----"
-            tail -n 120 build.log || true
-            exit 1
-          fi
-
-          while IFS= read -r f; do
-            cp "$f" dist/
-          done < apk_list.txt
-
+          find . -type f -name "*.apk" -not -path "./dist/*" -exec cp {} dist/ \;
           ls -lh dist/
-          echo "apk_count=$COUNT" >> "$GITHUB_OUTPUT"
 
-      - name: Rename APK with version info
-        run: |
-          cd dist
-          for f in *.apk; do
-            case "$f" in
-              *arm64-v8a*) NEW="quizassistant-arm64-v8a.apk" ;;
-              *armeabi-v7a*) NEW="quizassistant-armeabi-v7a.apk" ;;
-              *x86_64*) NEW="quizassistant-x86_64.apk" ;;
-              *) NEW="quizassistant-$f" ;;
-            esac
-            mv "$f" "$NEW" 2>/dev/null || true
-          done
-          ls -lh
-
-      # ============================================================
-      # 13. 上传 APK
-      # ============================================================
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -238,31 +146,3 @@ jobs:
           path: dist/*.apk
           retention-days: 30
           if-no-files-found: error
-
-      # ============================================================
-      # 14. 失败时上传日志
-      # ============================================================
-      - name: Upload build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log-${{ github.sha }}
-          path: |
-            build.log
-            build-*/
-          retention-days: 7
-          if-no-files-found: ignore
-
-      # ============================================================
-      # 15. 打 tag 时创建 Release
-      # ============================================================
-      - name: Create Release with APK
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*.apk
-          generate_release_notes: true
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
