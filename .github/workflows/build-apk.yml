@@ -221,6 +221,7 @@ jobs:
       # 执行打包
       # ============================================================
       - name: Run pyside6-android-deploy
+        id: deploy
         run: |
           set -o pipefail
           echo "======== JAVA_HOME ========"
@@ -228,13 +229,13 @@ jobs:
           java -version
           echo "======== ANDROID_HOME ========"
           echo "$ANDROID_HOME"
-          echo "=== 通过 tools/bin 访问 sdkmanager ==="
-          ls -la "$ANDROID_HOME/tools/bin/" || true
           echo "============================"
 
           WHEEL_PYSIDE="wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
           WHEEL_SHIBOKEN="wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
 
+          # 显式记录退出码，即使 tee 吞掉也能捕获
+          set +e
           pyside6-android-deploy \
             --config-file pysidedeploy.spec \
             --wheel-pyside "$WHEEL_PYSIDE" \
@@ -242,6 +243,11 @@ jobs:
             --ndk-path "$ANDROID_NDK_HOME" \
             --sdk-path "$ANDROID_HOME" \
             --force 2>&1 | tee build.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          echo "pyside6-android-deploy 退出码: $EXIT_CODE"
+          echo "deploy_exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
 
       # ============================================================
       # 收集 APK
@@ -261,14 +267,14 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Upload build log on failure
-        if: failure()
+      - name: Upload build log (always)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ github.sha }}
           path: |
             build.log
-            build-*/
-            .buildozer/
-          if-no-files-found: ignore
+            .buildozer/**/build.log
+            .buildozer/**/*.log
+          if-no-files-found: warn
           retention-days: 7
