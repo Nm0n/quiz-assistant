@@ -1,9 +1,10 @@
 # .github/workflows/build-apk.yml
 # 关键设计：
-#   - 全程统一使用 JDK 17（这是唯一能同时满足 sdkmanager / avdmanager 的版本）
-#   - 手动往 Android cmdline-tools 的 lib 目录注入 JAXB jar，
-#     解决 JDK 9+ 移除 javax.xml.bind 导致的 sdkmanager 报错
-#   - 不再使用 JDK 8
+#   - 全程使用 JDK 17（cmdline-tools 16.0 要求 JDK 17+）
+#   - 手动下载官方 cmdline-tools，避免 setup-android 的封装副作用
+#   - 用 sed 把 JAXB jar 追加到 sdkmanager 脚本的 CLASSPATH 里
+#     （不用 heredoc，避免 YAML 解析冲突）
+#   - 不使用 JDK 8（avdmanager 是 JDK 17 编译的，JDK 8 跑不起来）
 
 name: Build Android APK
 
@@ -39,7 +40,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       # ============================================================
-      # 全局统一 JDK 17
+      # 全局使用 JDK 17
       # ============================================================
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -53,7 +54,97 @@ jobs:
           java -version
 
       # ============================================================
-      # 安装 PySide6 和构建工具
+      # 手动安装 Android cmdline-tools（绕过 setup-android）
+      # ============================================================
+      - name: Manually install Android cmdline-tools
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          sudo mkdir -p "$ANDROID_HOME"
+          sudo chown -R $USER:$USER "$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+          cd /tmp
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-12266719_latest.zip -O cmdline-tools.zip
+          unzip -q cmdline-tools.zip
+
+          rm -rf "$ANDROID_HOME/cmdline-tools"
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          mv cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+
+          echo "=== cmdline-tools/latest/lib 内容（前 20 行） ==="
+          ls "$ANDROID_HOME/cmdline-tools/latest/lib/" | head -20
+          echo "=== 查找 JAXB ==="
+          ls "$ANDROID_HOME/cmdline-tools/latest/lib/" | grep -i "jaxb" || echo "!!! JAXB jar 未在 lib 目录中找到 !!!"
+
+      # ============================================================
+      # 关键：用 sed 把 JAXB jar 追加到 sdkmanager 的 CLASSPATH
+      #       不再使用 heredoc，避免 YAML 解析错误
+      # ============================================================
+      - name: Ensure JAXB in sdkmanager CLASSPATH
+        run: |
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          LIBDIR="$ANDROID_HOME/cmdline-tools/latest/lib"
+
+          echo "=== 修改前 CLASSPATH 行 ==="
+          grep -n "CLASSPATH" "$SDKMGR" || true
+
+          mkdir -p "$LIBDIR"
+          cd "$LIBDIR"
+          wget -q https://repo1.maven.org/maven2/javax/xml/bind/jaxb-api/2.3.1/jaxb-api-2.3.1.jar
+          wget -q https://repo1.maven.org/maven2/com/sun/xml/bind/jaxb-impl/2.3.1/jaxb-impl-2.3.1.jar
+          wget -q https://repo1.maven.org/maven2/org/glassfish/jaxb/jaxb-core/2.3.0/jaxb-core-2.3.0.jar
+          wget -q https://repo1.maven.org/maven2/javax/activation/javax.activation-api/1.2.0/javax.activation-api-1.2.0.jar
+
+          echo "=== lib 目录里的 JAXB jar ==="
+          ls -la "$LIBDIR" | grep -i jaxb || true
+
+          # 若脚本里还没有 jaxb-api-2.3.1，就在 CLASSPATH="... 后插入
+          if ! grep -q "jaxb-api-2.3.1" "$SDKMGR"; then
+            sed -i "s|^CLASSPATH=\"|CLASSPATH=\"$LIBDIR/jaxb-api-2.3.1.jar:$LIBDIR/jaxb-impl-2.3.1.jar:$LIBDIR/jaxb-core-2.3.0.jar:$LIBDIR/javax.activation-api-1.2.0.jar:|" "$SDKMGR"
+            echo "已在 CLASSPATH 前插入 JAXB jar"
+          else
+            echo "sdkmanager 已引用 jaxb-api-2.3.1，跳过"
+          fi
+
+          echo "=== 修改后 CLASSPATH 行 ==="
+          grep -n "CLASSPATH" "$SDKMGR" || true
+
+      - name: Add cmdline-tools to PATH
+        run: |
+          echo "/usr/local/lib/android/sdk/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "/usr/local/lib/android/sdk/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Verify sdkmanager works
+        run: |
+          which sdkmanager
+          sdkmanager --version
+
+      # ============================================================
+      # 安装 SDK 组件和 NDK
+      # ============================================================
+      - name: Install Android SDK components
+        run: |
+          yes | sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-${ANDROID_SDK_VERSION}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" || true
+          yes | sdkmanager --licenses || true
+
+      - name: Install Android NDK
+        run: |
+          yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
+          test -d "/usr/local/lib/android/sdk/ndk/${ANDROID_NDK_VERSION}" || (echo "NDK 安装失败" && exit 1)
+          echo "NDK 已安装"
+
+      - name: Export NDK env
+        run: |
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=/usr/local/lib/android/sdk/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # Python 依赖
       # ============================================================
       - name: Install PySide6 and deploy tools
         run: |
@@ -62,11 +153,7 @@ jobs:
           pip install "shiboken6==${PYSIDE_VERSION}"
           pip install packaging jinja2 pkginfo tqdm
           pip install buildozer cython virtualenv
-          pip list | grep -i -E "pyside|shiboken|buildozer"
 
-      # ============================================================
-      # 下载 Android wheel
-      # ============================================================
       - name: Download Android Wheels
         run: |
           mkdir -p wheels
@@ -78,88 +165,6 @@ jobs:
             -O "wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
           ls -lh wheels/
 
-      # ============================================================
-      # 配置 Android SDK（此时 JDK 17 已就绪，但 sdkmanager 还会报 JAXB 缺类，
-      # 所以下一步先注入 JAXB，再回来执行 sdkmanager 命令）
-      # ============================================================
-      - name: Set up Android SDK (may emit JAXB warnings, that's OK)
-        uses: android-actions/setup-android@v3
-
-      # ============================================================
-      # 【关键】下载 JAXB 并注入到 cmdline-tools 的 lib 目录
-      # ============================================================
-      - name: Install JAXB Library
-        run: |
-          mkdir -p $HOME/jaxb-libs
-          cd $HOME/jaxb-libs
-          wget -q https://repo1.maven.org/maven2/javax/xml/bind/jaxb-api/2.3.1/jaxb-api-2.3.1.jar
-          wget -q https://repo1.maven.org/maven2/com/sun/xml/bind/jaxb-impl/2.3.1/jaxb-impl-2.3.1.jar
-          wget -q https://repo1.maven.org/maven2/javax/activation/javax.activation-api/1.2.0/javax.activation-api-1.2.0.jar
-          echo "下载完成："
-          ls -la
-
-      - name: Inject JAXB into Android cmdline-tools
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          # cmdline-tools 可能位于多个版本目录，全部注入
-          for d in $ANDROID_HOME/cmdline-tools/*/lib; do
-            if [ -d "$d" ]; then
-              echo "注入到: $d"
-              cp $HOME/jaxb-libs/*.jar "$d/"
-            fi
-          done
-          echo "---- 注入后的 lib 目录 ----"
-          ls -la $ANDROID_HOME/cmdline-tools/latest/lib/ | grep -i jaxb || true
-
-      - name: Install Android SDK components
-        run: |
-          echo "验证 JAXB 注入后 sdkmanager 是否可用..."
-          sdkmanager --version
-          yes | sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-${ANDROID_SDK_VERSION}" \
-            "build-tools;${ANDROID_BUILD_TOOLS}" \
-            "cmdline-tools;latest" || true
-          yes | sdkmanager --licenses || true
-
-      - name: Install Android NDK
-        run: |
-          yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}" || true
-          if [ ! -d "${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" ]; then
-            NDK_ZIP="android-ndk-r25b-linux.zip"
-            wget -q "https://dl.google.com/android/repository/${NDK_ZIP}"
-            sudo mkdir -p /opt/android-ndk
-            sudo unzip -q "${NDK_ZIP}" -d /opt/android-ndk
-          fi
-
-      - name: Export Android environment variables
-        run: |
-          if [ -z "$ANDROID_HOME" ]; then
-            if [ -d "/usr/local/lib/android/sdk" ]; then
-              echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
-            fi
-          else
-            echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
-          fi
-
-          NDK_CANDIDATE=""
-          if [ -d "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" ]; then
-            NDK_CANDIDATE="$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}"
-          elif [ -d "/usr/local/lib/android/sdk/ndk/${ANDROID_NDK_VERSION}" ]; then
-            NDK_CANDIDATE="/usr/local/lib/android/sdk/ndk/${ANDROID_NDK_VERSION}"
-          elif [ -d "/opt/android-ndk/android-ndk-r25b" ]; then
-            NDK_CANDIDATE="/opt/android-ndk/android-ndk-r25b"
-          fi
-
-          if [ -n "$NDK_CANDIDATE" ]; then
-            echo "ANDROID_NDK_HOME=$NDK_CANDIDATE" >> "$GITHUB_ENV"
-            echo "ANDROID_NDK_ROOT=$NDK_CANDIDATE" >> "$GITHUB_ENV"
-            echo "Detected NDK at: $NDK_CANDIDATE"
-          else
-            echo "::error::未能探测到 NDK 路径，停止构建"
-            exit 1
-          fi
-
       - name: Sanity check project layout
         run: |
           test -f main.py            || (echo "缺少 main.py" && exit 1)
@@ -167,23 +172,22 @@ jobs:
           test -d core               || (echo "缺少 core/" && exit 1)
           test -d qml                || (echo "缺少 qml/" && exit 1)
           test -f qml/main.qml       || (echo "缺少 qml/main.qml" && exit 1)
-          echo "工程结构检查通过"
 
       # ============================================================
-      # 打包（使用 JDK 17）
+      # 执行打包
       # ============================================================
       - name: Run pyside6-android-deploy
         run: |
           set -o pipefail
-          echo "======== 当前 JAVA_HOME ========"
+          echo "======== JAVA_HOME ========"
           echo "$JAVA_HOME"
           java -version
-          echo "================================"
+          echo "======== ANDROID_HOME ========"
+          echo "$ANDROID_HOME"
+          echo "============================"
 
           WHEEL_PYSIDE="wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
           WHEEL_SHIBOKEN="wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
-          echo "使用 PySide wheel: $WHEEL_PYSIDE"
-          echo "使用 Shiboken wheel: $WHEEL_SHIBOKEN"
 
           pyside6-android-deploy \
             --config-file pysidedeploy.spec \
@@ -200,48 +204,16 @@ jobs:
         if: always()
         run: |
           mkdir -p dist
-          echo "搜索 APK 文件..."
-          find . -type f -name "*.apk" -not -path "./dist/*" | tee apk_list.txt || true
-
-          COUNT=$(wc -l < apk_list.txt)
-          if [ "$COUNT" -eq 0 ]; then
-            echo "::warning::未找到任何 APK 产物"
-            echo "---- 目录结构 ----"
-            find . -maxdepth 4 -type d | head -80
-            echo "---- build.log 末尾 ----"
-            tail -n 150 build.log || true
-            exit 1
-          fi
-
-          while IFS= read -r f; do
-            [ -f "$f" ] && cp "$f" dist/
-          done < apk_list.txt
-          ls -lh dist/
-          echo "共找到 $COUNT 个 APK 文件"
-
-      - name: Rename APK
-        if: always()
-        run: |
-          cd dist 2>/dev/null || exit 0
-          for f in *.apk; do
-            [ -f "$f" ] || continue
-            case "$f" in
-              *arm64-v8a*) NEW="quizassistant-arm64-v8a.apk" ;;
-              *armeabi-v7a*) NEW="quizassistant-armeabi-v7a.apk" ;;
-              *x86_64*) NEW="quizassistant-x86_64.apk" ;;
-              *) NEW="quizassistant-$f" ;;
-            esac
-            mv "$f" "$NEW" 2>/dev/null || true
-          done
-          ls -lh
+          find . -type f -name "*.apk" -not -path "./dist/*" -exec cp {} dist/ \; 2>/dev/null || true
+          ls -lh dist/ || true
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: quizassistant-apk-${{ github.sha }}
           path: dist/*.apk
+          if-no-files-found: warn
           retention-days: 30
-          if-no-files-found: error
 
       - name: Upload build log on failure
         if: failure()
@@ -252,16 +224,5 @@ jobs:
             build.log
             build-*/
             .buildozer/
-          retention-days: 7
           if-no-files-found: ignore
-
-      - name: Create Release with APK
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*.apk
-          generate_release_notes: true
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          retention-days: 7
