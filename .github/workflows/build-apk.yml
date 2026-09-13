@@ -15,8 +15,6 @@ env:
   ANDROID_SDK_VERSION: '33'
   ANDROID_NDK_VERSION: '25.2.9519653'
   ANDROID_BUILD_TOOLS: '33.0.2'
-  # ⚠️ 注意：这里改为了 JDK 8
-  JDK_VERSION: '8'
 
 jobs:
   build-apk:
@@ -28,22 +26,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ============================================================
+      # 1. 安装 Python 和 JDK 17 (用于 setup-android)
+      # ============================================================
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      # ============================================================
-      # 1. 安装 JDK 8（关键修改）
-      # ============================================================
-      - name: Set up JDK ${{ env.JDK_VERSION }}
+      - name: Set up JDK 17 (for Android SDK tools)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: ${{ env.JDK_VERSION }}
-
-      - name: Verify Java
-        run: java -version
+          java-version: '17'
 
       # ============================================================
       # 2. 安装 PySide6 和构建工具
@@ -58,7 +53,7 @@ jobs:
           pip list | grep -i -E "pyside|shiboken|buildozer"
 
       # ============================================================
-      # 3. 下载 Android Wheel（保持不变）
+      # 3. 下载 Android Wheel (保持不变)
       # ============================================================
       - name: Download Android Wheels (from Qt official mirror)
         run: |
@@ -72,7 +67,7 @@ jobs:
           ls -lh wheels/
 
       # ============================================================
-      # 4. 配置 Android SDK / NDK
+      # 4. 配置 Android SDK (此时仍在使用 JDK 17)
       # ============================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -122,8 +117,17 @@ jobs:
           fi
 
       # ============================================================
-      # 5. 执行打包
+      # 5. 【关键】切换到 JDK 8 并执行打包
       # ============================================================
+      - name: Set up JDK 8 (for Buildozer)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '8'
+
+      - name: Verify Java version
+        run: java -version
+
       - name: Run pyside6-android-deploy
         run: |
           set -o pipefail
@@ -141,7 +145,7 @@ jobs:
             --force 2>&1 | tee build.log
 
       # ============================================================
-      # 6. 收集 APK（保持你上次的修改）
+      # 6. 收集 APK (保持不变)
       # ============================================================
       - name: Collect APK artifacts
         run: |
