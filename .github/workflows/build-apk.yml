@@ -1,9 +1,9 @@
 # .github/workflows/build-apk.yml
 # 关键设计：
-#   - 步骤 3~9 使用 JDK 17：供 android-actions/setup-android 与 sdkmanager 使用
-#   - 步骤 10 才安装 JDK 8：setup-java 会自动把全局 JAVA_HOME 切到 JDK 8
-#   - 步骤 11 打包：buildozer / pyside6-android-deploy 运行在 JDK 8 下
-#   - 不再手动修改 JAVA_HOME，完全依赖 actions/setup-java
+#   - 全程统一使用 JDK 17（这是唯一能同时满足 sdkmanager / avdmanager 的版本）
+#   - 手动往 Android cmdline-tools 的 lib 目录注入 JAXB jar，
+#     解决 JDK 9+ 移除 javax.xml.bind 导致的 sdkmanager 报错
+#   - 不再使用 JDK 8
 
 name: Build Android APK
 
@@ -30,41 +30,30 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      # ============================================================
-      # 1. 检出代码
-      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ============================================================
-      # 2. 安装 Python
-      # ============================================================
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Verify Python
-        run: |
-          python --version
-          pip --version
-
       # ============================================================
-      # 3. 安装 JDK 17（供 SDK 工具使用，直到打包前都会保持为默认）
+      # 全局统一 JDK 17
       # ============================================================
-      - name: Set up JDK 17 (for Android SDK tools)
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Verify Java 17
+      - name: Verify Java
         run: |
           echo "JAVA_HOME=$JAVA_HOME"
           java -version
 
       # ============================================================
-      # 4. 安装 PySide6 和构建工具
+      # 安装 PySide6 和构建工具
       # ============================================================
       - name: Install PySide6 and deploy tools
         run: |
@@ -76,7 +65,7 @@ jobs:
           pip list | grep -i -E "pyside|shiboken|buildozer"
 
       # ============================================================
-      # 5. 从 Qt 官方镜像下载 Android wheel
+      # 下载 Android wheel
       # ============================================================
       - name: Download Android Wheels
         run: |
@@ -87,17 +76,45 @@ jobs:
           wget -q --show-progress \
             "https://download.qt.io/official_releases/QtForPython/shiboken6/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
             -O "wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
-          echo "下载的 wheel 文件："
           ls -lh wheels/
 
       # ============================================================
-      # 6. 配置 Android SDK（仍使用 JDK 17）
+      # 配置 Android SDK（此时 JDK 17 已就绪，但 sdkmanager 还会报 JAXB 缺类，
+      # 所以下一步先注入 JAXB，再回来执行 sdkmanager 命令）
       # ============================================================
-      - name: Set up Android SDK
+      - name: Set up Android SDK (may emit JAXB warnings, that's OK)
         uses: android-actions/setup-android@v3
+
+      # ============================================================
+      # 【关键】下载 JAXB 并注入到 cmdline-tools 的 lib 目录
+      # ============================================================
+      - name: Install JAXB Library
+        run: |
+          mkdir -p $HOME/jaxb-libs
+          cd $HOME/jaxb-libs
+          wget -q https://repo1.maven.org/maven2/javax/xml/bind/jaxb-api/2.3.1/jaxb-api-2.3.1.jar
+          wget -q https://repo1.maven.org/maven2/com/sun/xml/bind/jaxb-impl/2.3.1/jaxb-impl-2.3.1.jar
+          wget -q https://repo1.maven.org/maven2/javax/activation/javax.activation-api/1.2.0/javax.activation-api-1.2.0.jar
+          echo "下载完成："
+          ls -la
+
+      - name: Inject JAXB into Android cmdline-tools
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          # cmdline-tools 可能位于多个版本目录，全部注入
+          for d in $ANDROID_HOME/cmdline-tools/*/lib; do
+            if [ -d "$d" ]; then
+              echo "注入到: $d"
+              cp $HOME/jaxb-libs/*.jar "$d/"
+            fi
+          done
+          echo "---- 注入后的 lib 目录 ----"
+          ls -la $ANDROID_HOME/cmdline-tools/latest/lib/ | grep -i jaxb || true
 
       - name: Install Android SDK components
         run: |
+          echo "验证 JAXB 注入后 sdkmanager 是否可用..."
+          sdkmanager --version
           yes | sdkmanager --install \
             "platform-tools" \
             "platforms;android-${ANDROID_SDK_VERSION}" \
@@ -105,9 +122,6 @@ jobs:
             "cmdline-tools;latest" || true
           yes | sdkmanager --licenses || true
 
-      # ============================================================
-      # 7. 安装 Android NDK（仍使用 JDK 17）
-      # ============================================================
       - name: Install Android NDK
         run: |
           yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}" || true
@@ -118,9 +132,6 @@ jobs:
             sudo unzip -q "${NDK_ZIP}" -d /opt/android-ndk
           fi
 
-      # ============================================================
-      # 8. 探测并导出 ANDROID_HOME / NDK 路径
-      # ============================================================
       - name: Export Android environment variables
         run: |
           if [ -z "$ANDROID_HOME" ]; then
@@ -149,9 +160,6 @@ jobs:
             exit 1
           fi
 
-      # ============================================================
-      # 9. 预检工程结构
-      # ============================================================
       - name: Sanity check project layout
         run: |
           test -f main.py            || (echo "缺少 main.py" && exit 1)
@@ -162,22 +170,7 @@ jobs:
           echo "工程结构检查通过"
 
       # ============================================================
-      # 10. 【关键】切换到 JDK 8 —— 打包前最后一步
-      #     setup-java 会自动把 JAVA_HOME 和 PATH 更新为 JDK 8
-      # ============================================================
-      - name: Set up JDK 8 (for Buildozer)
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '8'
-
-      - name: Verify Java 8 (should be 1.8.0_xxx)
-        run: |
-          echo "JAVA_HOME=$JAVA_HOME"
-          java -version
-
-      # ============================================================
-      # 11. 执行打包（此时 JAVA_HOME 已是 JDK 8）
+      # 打包（使用 JDK 17）
       # ============================================================
       - name: Run pyside6-android-deploy
         run: |
@@ -201,7 +194,7 @@ jobs:
             --force 2>&1 | tee build.log
 
       # ============================================================
-      # 12. 收集 APK
+      # 收集 APK
       # ============================================================
       - name: Collect APK artifacts
         if: always()
@@ -226,9 +219,6 @@ jobs:
           ls -lh dist/
           echo "共找到 $COUNT 个 APK 文件"
 
-      # ============================================================
-      # 13. 重命名 APK
-      # ============================================================
       - name: Rename APK
         if: always()
         run: |
@@ -245,9 +235,6 @@ jobs:
           done
           ls -lh
 
-      # ============================================================
-      # 14. 上传 APK
-      # ============================================================
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -256,9 +243,6 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      # ============================================================
-      # 15. 失败时上传 build.log
-      # ============================================================
       - name: Upload build log on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -271,9 +255,6 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      # ============================================================
-      # 16. 打 tag 时创建 Release
-      # ============================================================
       - name: Create Release with APK
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
