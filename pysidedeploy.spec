@@ -5,6 +5,10 @@ package = org.quizassistant.quiz
 
 [python]
 python_version = 3.11
+android_packages = 
 
 [android]
 
+[qt]
+
+[buildozer]
