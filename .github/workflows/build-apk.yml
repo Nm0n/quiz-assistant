@@ -15,7 +15,8 @@ env:
   ANDROID_SDK_VERSION: '33'
   ANDROID_NDK_VERSION: '25.2.9519653'
   ANDROID_BUILD_TOOLS: '33.0.2'
-  JDK_VERSION: '17'
+  # ⚠️ 注意：这里改为了 JDK 8
+  JDK_VERSION: '8'
 
 jobs:
   build-apk:
@@ -32,14 +33,20 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # ============================================================
+      # 1. 安装 JDK 8（关键修改）
+      # ============================================================
       - name: Set up JDK ${{ env.JDK_VERSION }}
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: ${{ env.JDK_VERSION }}
 
+      - name: Verify Java
+        run: java -version
+
       # ============================================================
-      # 1. 安装 PySide6（仅用于桌面端工具，Android wheel 单独下载）
+      # 2. 安装 PySide6 和构建工具
       # ============================================================
       - name: Install PySide6 and deploy tools
         run: |
@@ -51,25 +58,21 @@ jobs:
           pip list | grep -i -E "pyside|shiboken|buildozer"
 
       # ============================================================
-      # 2. 关键步骤：直接从 Qt 官方镜像下载 Android wheel
-      #    使用 wget，完全绕开 qtpip
+      # 3. 下载 Android Wheel（保持不变）
       # ============================================================
       - name: Download Android Wheels (from Qt official mirror)
         run: |
           mkdir -p wheels
-          # PySide6 wheel
           wget -q --show-progress \
             "https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
             -O "wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
-          # shiboken6 wheel
           wget -q --show-progress \
             "https://download.qt.io/official_releases/QtForPython/shiboken6/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
             -O "wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
-          echo "下载的 wheel 文件："
           ls -lh wheels/
 
       # ============================================================
-      # 3. 配置 Android SDK / NDK
+      # 4. 配置 Android SDK / NDK
       # ============================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -119,7 +122,7 @@ jobs:
           fi
 
       # ============================================================
-      # 4. 执行打包（关键：显式指定 wheel 文件名和 NDK/SDK 路径）
+      # 5. 执行打包
       # ============================================================
       - name: Run pyside6-android-deploy
         run: |
@@ -138,22 +141,18 @@ jobs:
             --force 2>&1 | tee build.log
 
       # ============================================================
-      # 5. 收集 APK
+      # 6. 收集 APK（保持你上次的修改）
       # ============================================================
       - name: Collect APK artifacts
         run: |
           set -e
           mkdir -p dist
           echo "搜索 APK 文件..."
-          # 在整个项目目录下搜索 .apk 文件，但排除 dist/ 目录本身
           find . -type f -name "*.apk" -not -path "./dist/*" | tee apk_list.txt
 
           COUNT=$(wc -l < apk_list.txt)
           if [ "$COUNT" -eq 0 ]; then
             echo "::error::未找到任何 APK 产物，请检查 build.log"
-            echo "---- 项目目录结构 ----"
-            find . -maxdepth 3 -type d | head -50
-            echo "---- build.log 末尾 ----"
             tail -n 80 build.log || true
             exit 1
           fi
@@ -161,6 +160,12 @@ jobs:
           while IFS= read -r f; do
             cp "$f" dist/
           done < apk_list.txt
-
           ls -lh dist/
-          echo "共找到 $COUNT 个 APK 文件"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quizassistant-apk-${{ github.sha }}
+          path: dist/*.apk
+          retention-days: 30
+          if-no-files-found: error
