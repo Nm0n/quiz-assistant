@@ -1,11 +1,9 @@
 # .github/workflows/build-apk.yml
-# GitHub Actions 工作流：云端自动打包 Android APK
-#
 # 关键设计：
-#   - JDK 17 用于 android-actions/setup-android 和 sdkmanager
-#   - JDK 8  用于 buildozer / pyside6-android-deploy
-#   - 通过 JAVA_HOME 环境变量在打包步骤动态切换，不影响其他步骤
-#   - Android wheel 从 Qt 官方镜像下载，绕开 qtpip 的不稳定行为
+#   - 步骤 3~9 使用 JDK 17：供 android-actions/setup-android 与 sdkmanager 使用
+#   - 步骤 10 才安装 JDK 8：setup-java 会自动把全局 JAVA_HOME 切到 JDK 8
+#   - 步骤 11 打包：buildozer / pyside6-android-deploy 运行在 JDK 8 下
+#   - 不再手动修改 JAVA_HOME，完全依赖 actions/setup-java
 
 name: Build Android APK
 
@@ -52,7 +50,7 @@ jobs:
           pip --version
 
       # ============================================================
-      # 3. 安装 JDK 17（用于 android-actions/setup-android 与 sdkmanager）
+      # 3. 安装 JDK 17（供 SDK 工具使用，直到打包前都会保持为默认）
       # ============================================================
       - name: Set up JDK 17 (for Android SDK tools)
         uses: actions/setup-java@v4
@@ -61,34 +59,12 @@ jobs:
           java-version: '17'
 
       - name: Verify Java 17
-        run: java -version
-
-      # ============================================================
-      # 4. 安装 JDK 8（用于 buildozer / pyside6-android-deploy）
-      #    setup-java 会把两个 JDK 都装到 hostedtoolcache，
-      #    但默认 JAVA_HOME 是后装的那个。所以我们把 JDK 17 重新设为全局默认，
-      #    JDK 8 仅在打包步骤通过 env 临时启用。
-      # ============================================================
-      - name: Set up JDK 8 (for Buildozer)
-        id: jdk8-setup
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '8'
-
-      - name: Restore JDK 17 as default
         run: |
-          JDK17_HOME=$(find /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk -maxdepth 1 -type d -name "17*" | head -1)
-          if [ -z "$JDK17_HOME" ]; then
-            echo "::error::未找到 JDK 17"
-            exit 1
-          fi
-          echo "JAVA_HOME=$JDK17_HOME" >> "$GITHUB_ENV"
-          echo "$JDK17_HOME/bin" >> "$GITHUB_PATH"
-          echo "全局 JDK 17 路径: $JDK17_HOME"
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
 
       # ============================================================
-      # 5. 安装 PySide6 和构建工具
+      # 4. 安装 PySide6 和构建工具
       # ============================================================
       - name: Install PySide6 and deploy tools
         run: |
@@ -100,7 +76,7 @@ jobs:
           pip list | grep -i -E "pyside|shiboken|buildozer"
 
       # ============================================================
-      # 6. 下载 Android Wheel（从 Qt 官方镜像，绕开 qtpip）
+      # 5. 从 Qt 官方镜像下载 Android wheel
       # ============================================================
       - name: Download Android Wheels
         run: |
@@ -115,7 +91,7 @@ jobs:
           ls -lh wheels/
 
       # ============================================================
-      # 7. 配置 Android SDK（此时 JDK 17 为全局默认）
+      # 6. 配置 Android SDK（仍使用 JDK 17）
       # ============================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -129,6 +105,9 @@ jobs:
             "cmdline-tools;latest" || true
           yes | sdkmanager --licenses || true
 
+      # ============================================================
+      # 7. 安装 Android NDK（仍使用 JDK 17）
+      # ============================================================
       - name: Install Android NDK
         run: |
           yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}" || true
@@ -183,28 +162,24 @@ jobs:
           echo "工程结构检查通过"
 
       # ============================================================
-      # 10. 定位 JDK 8 路径（供下一步动态切换用）
+      # 10. 【关键】切换到 JDK 8 —— 打包前最后一步
+      #     setup-java 会自动把 JAVA_HOME 和 PATH 更新为 JDK 8
       # ============================================================
-      - name: Locate JDK 8
-        id: locate-jdk8
+      - name: Set up JDK 8 (for Buildozer)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '8'
+
+      - name: Verify Java 8 (should be 1.8.0_xxx)
         run: |
-          JDK8_HOME=$(find /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk -maxdepth 1 -type d -name "8*" | head -1)
-          if [ -z "$JDK8_HOME" ]; then
-            echo "::error::未找到 JDK 8，请确认 setup-java 已安装 JDK 8"
-            exit 1
-          fi
-          echo "jdk8_home=$JDK8_HOME" >> "$GITHUB_OUTPUT"
-          echo "JDK 8 路径: $JDK8_HOME"
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
 
       # ============================================================
-      # 11. 执行打包
-      #     关键：仅在这一步通过 env 把 JAVA_HOME 切到 JDK 8
-      #     这样 buildozer 用 JDK 8，其他步骤仍用 JDK 17
+      # 11. 执行打包（此时 JAVA_HOME 已是 JDK 8）
       # ============================================================
       - name: Run pyside6-android-deploy
-        env:
-          JAVA_HOME: ${{ steps.locate-jdk8.outputs.jdk8_home }}
-          PATH: ${{ steps.locate-jdk8.outputs.jdk8_home }}/bin:/usr/local/lib/android/sdk/platform-tools:/usr/local/lib/android/sdk/cmdline-tools/latest/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         run: |
           set -o pipefail
           echo "======== 当前 JAVA_HOME ========"
@@ -226,12 +201,11 @@ jobs:
             --force 2>&1 | tee build.log
 
       # ============================================================
-      # 12. 收集 APK（自动搜索，不依赖固定路径）
+      # 12. 收集 APK
       # ============================================================
       - name: Collect APK artifacts
         if: always()
         run: |
-          set -e
           mkdir -p dist
           echo "搜索 APK 文件..."
           find . -type f -name "*.apk" -not -path "./dist/*" | tee apk_list.txt || true
@@ -240,9 +214,9 @@ jobs:
           if [ "$COUNT" -eq 0 ]; then
             echo "::warning::未找到任何 APK 产物"
             echo "---- 目录结构 ----"
-            find . -maxdepth 3 -type d | head -50
+            find . -maxdepth 4 -type d | head -80
             echo "---- build.log 末尾 ----"
-            tail -n 120 build.log || true
+            tail -n 150 build.log || true
             exit 1
           fi
 
@@ -272,7 +246,7 @@ jobs:
           ls -lh
 
       # ============================================================
-      # 14. 上传 APK artifact
+      # 14. 上传 APK
       # ============================================================
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -283,7 +257,7 @@ jobs:
           if-no-files-found: error
 
       # ============================================================
-      # 15. 失败时上传 build.log 便于排查
+      # 15. 失败时上传 build.log
       # ============================================================
       - name: Upload build log on failure
         if: failure()
