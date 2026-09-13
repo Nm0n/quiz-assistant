@@ -7,8 +7,16 @@ package = org.quizassistant.quiz
 python_version = 3.11
 android_packages = 
 
-[android]
-
 [qt]
+qml_files = 
+excluded_qml_plugins = 
+
+[android]
+plugins = 
 
 [buildozer]
+recipe_dir = 
+jars_dir = 
+arch = arm64-v8a
+mode = debug
+local_libs = 
