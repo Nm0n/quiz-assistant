@@ -24,7 +24,7 @@ on:
 env:
   # 保持与 pysidedeploy.spec 中的 python_version 一致
   PYTHON_VERSION: '3.11'
-  PYSIDE_VERSION: '6.7.3'
+  PYSIDE_VERSION: '6.8.0'
   # Android 工具链版本（按需调整）
   ANDROID_SDK_VERSION: '33'
   ANDROID_NDK_VERSION: '25.2.9519653'
