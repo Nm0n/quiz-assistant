@@ -380,21 +380,31 @@ def main():
     app.setOrganizationName("QuizAssistant")
 
     engine = QQmlApplicationEngine()
-    engine.warnings.connect(lambda ws: [print("[QML WARN]", w.toString()) for w in ws])
-
-    # ★★★ 关键：必须用变量持有 bridge，否则会被 Python GC 回收，
-    #     导致 QML 侧 bridge === null，所有调用报
-    #     "Cannot read property 'viewState' of null"。
     bridge = ControllerBridge()
     engine.rootContext().setContextProperty("bridge", bridge)
 
-    qml_path = _qml_main_path()
-    engine.load(QUrl.fromLocalFile(qml_path))
-    if not engine.rootObjects():
-        sys.stderr.write("QML 加载失败：{}\n".format(qml_path))
-        sys.exit(-1)
+    # 尝试多种路径，取第一个能读到的
+    qml_candidates = [
+        "qrc:/qml/main.qml",                    # Android 资源路径
+        os.path.join(os.path.dirname(__file__), "qml", "main.qml"),
+        os.path.join(os.getcwd(), "qml", "main.qml"),
+    ]
+    loaded = False
+    for path in qml_candidates:
+        if path.startswith("qrc:/"):
+            engine.load(QUrl(path))
+        else:
+            if os.path.exists(path):
+                engine.load(QUrl.fromLocalFile(path))
+            else:
+                continue
+        if engine.rootObjects():
+            loaded = True
+            break
 
-    sys.exit(app.exec())
+    if not loaded:
+        sys.stderr.write("QML 加载失败\n")
+        sys.exit(-1)
 
 
 if __name__ == "__main__":
