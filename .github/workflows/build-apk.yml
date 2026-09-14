@@ -239,7 +239,6 @@ jobs:
           WHEEL_PYSIDE="wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
           WHEEL_SHIBOKEN="wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
 
-          # 注意：不要加 --force，否则 p4a 会被重新 clone
           set +e
           pyside6-android-deploy \
             --config-file pysidedeploy.spec \
@@ -247,6 +246,7 @@ jobs:
             --wheel-shiboken "$WHEEL_SHIBOKEN" \
             --ndk-path "$ANDROID_NDK_HOME" \
             --sdk-path "$ANDROID_HOME" \
+            --force \
             2>&1 | tee build.log
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
