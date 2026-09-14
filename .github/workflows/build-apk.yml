@@ -220,11 +220,32 @@ jobs:
       # ============================================================
       # 执行打包
       # ============================================================
-      - name: Clean buildozer cache
+      - name: Force p4a to use Python 3.11
         run: |
-          rm -rf .buildozer
-          rm -rf ~/.buildozer
-          echo "已清理 .buildozer 缓存"
+          # p4a 会被克隆到 .buildozer/android/platform/python-for-android
+          P4A_DIR="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android"
+
+          # 先手动克隆 p4a，避免 pyside6-android-deploy 克隆后我们改不到
+          mkdir -p "$(dirname "$P4A_DIR")"
+          rm -rf "$P4A_DIR"
+          git clone --depth 1 -b develop --single-branch \
+            https://github.com/kivy/python-for-android.git "$P4A_DIR"
+
+          # 找到 python3 recipe
+          RECIPE="$P4A_DIR/pythonforandroid/recipes/python3/__init__.py"
+          echo "=== 修改前 ==="
+          grep -n "version" "$RECIPE" | head -5
+
+          # 把 3.14.x / 3.13.x / 3.12.x 全部强制改成 3.11.5
+          sed -i "s/version = '3\.14\.[0-9]*'/version = '3.11.5'/" "$RECIPE"
+          sed -i "s/version = '3\.13\.[0-9]*'/version = '3.11.5'/" "$RECIPE"
+          sed -i "s/version = '3\.12\.[0-9]*'/version = '3.11.5'/" "$RECIPE"
+          sed -i "s/version = \"3\.14\.[0-9]*\"/version = \"3.11.5\"/" "$RECIPE"
+          sed -i "s/version = \"3\.13\.[0-9]*\"/version = \"3.11.5\"/" "$RECIPE"
+          sed -i "s/version = \"3\.12\.[0-9]*\"/version = \"3.11.5\"/" "$RECIPE"
+
+          echo "=== 修改后 ==="
+          grep -n "version" "$RECIPE" | head -5
       
       - name: Run pyside6-android-deploy
         id: deploy
