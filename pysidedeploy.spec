@@ -15,7 +15,6 @@ excluded_qml_plugins =
 plugins = 
 
 [buildozer]
-requirements = python3, shiboken6, PySide6
 recipe_dir = 
 jars_dir = 
 arch = arm64-v8a
