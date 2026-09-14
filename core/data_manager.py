@@ -20,15 +20,18 @@ class DataManager:
     """
 
     def __init__(self, data_dir: str = "data"):
-    try:
-        if not os.path.exists(data_dir):
+        """
+        初始化数据管理器，自动创建数据目录（Android 下自动回退到可写目录）
+        """
+        # 尝试创建用户指定的目录；失败则回退到系统临时目录
+        try:
+            if not os.path.exists(data_dir):
+                os.makedirs(data_dir, exist_ok=True)
+        except Exception:
+            import tempfile
+            data_dir = os.path.join(tempfile.gettempdir(), "quizassistant")
             os.makedirs(data_dir, exist_ok=True)
-    except Exception:
-        # Android 沙盒下无法创建相对路径目录，退而使用标准应用目录
-        import tempfile, os as _os
-        data_dir = _os.path.join(tempfile.gettempdir(), "quizassistant")
-        _os.makedirs(data_dir, exist_ok=True)
-    self.data_dir = data_dir
+        self.data_dir = data_dir
 
     def _get_default_path(self, filename: str = "questions.json") -> str:
         """获取默认路径（仅用于向后兼容）"""
