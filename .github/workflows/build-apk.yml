@@ -6,6 +6,7 @@
 #   - 不带 --force，让 pyside6-android-deploy 复用我们打过补丁的 p4a
 #   - 全程 JDK 17
 #   - 手动装 cmdline-tools + 注入 JAXB + 建立 legacy 软链接
+#   - 【关键修改】NDK 升级到 r27c，与 PySide6 6.8.2 的 Qt 原生库对齐
 
 name: Build Android APK
 
@@ -22,7 +23,8 @@ env:
   PYTHON_VERSION: '3.11'
   PYSIDE_VERSION: '6.8.2'
   ANDROID_SDK_VERSION: '33'
-  ANDROID_NDK_VERSION: '25.2.9519653'
+  # ========== 关键修改：NDK 从 25.2.9519653 升级到 27c ==========
+  ANDROID_NDK_VERSION: '27.2.12479018'
   ANDROID_BUILD_TOOLS: '33.0.2'
   ANDROID_HOME: /usr/local/lib/android/sdk
 
@@ -133,16 +135,24 @@ jobs:
             "build-tools;${ANDROID_BUILD_TOOLS}" || true
           yes | sdkmanager --licenses || true
 
-      - name: Install Android NDK
+      # ============================================================
+      # 【关键修改】安装 NDK r27c 并导出环境变量
+      # ============================================================
+      - name: Install Android NDK r27c
         run: |
           yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
           test -d "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" || (echo "NDK 安装失败" && exit 1)
-          echo "NDK 已安装"
+          echo "NDK r27c 已安装"
+          echo "=== NDK 目录内容 ==="
+          ls "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}/" | head -20
 
       - name: Export NDK env
         run: |
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "=== 验证 NDK 环境变量 ==="
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
 
       # ============================================================
       # 系统依赖
@@ -232,6 +242,9 @@ jobs:
           echo "======== JAVA_HOME ========"
           echo "$JAVA_HOME"
           java -version
+          echo "======== NDK 信息 ========"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          ls "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/" | grep -i "libc++" || true
           echo "======== p4a 当前状态 ========"
           grep -E "^[[:space:]]*version[[:space:]]*=" .buildozer/android/platform/python-for-android/pythonforandroid/recipes/python3/__init__.py || true
           echo "============================"
@@ -263,9 +276,9 @@ jobs:
           ls -lh dist/ || true
 
       # ============================================================
-      # 【核心校验】检查 APK 里的 libpython 版本
+      # 【核心校验】检查 APK 里的 libpython 和 libc++_shared 版本
       # ============================================================
-      - name: Verify APK contains libpython3.11.so
+      - name: Verify APK contains libpython3.11.so and correct libc++_shared.so
         if: always()
         run: |
           APK=$(find dist -name "*.apk" | head -1)
@@ -278,6 +291,22 @@ jobs:
           unzip -l "$APK" | grep -E "libpython3" || echo "!!! 未找到 libpython3.x.so !!!"
           echo "=== libshiboken*.so ==="
           unzip -l "$APK" | grep -E "libshiboken" || echo "!!! 未找到 libshiboken*.so !!!"
+          echo "=== libc++_shared.so ==="
+          unzip -l "$APK" | grep -E "libc\+\+_shared" || echo "!!! 未找到 libc++_shared.so !!!"
+
+          # 提取 APK 中的 libc++_shared.so，检查是否包含 pmr 符号
+          echo "=== 检查 libc++_shared.so 是否包含 std::pmr 符号 ==="
+          mkdir -p /tmp/apkcheck
+          unzip -o "$APK" "lib/arm64-v8a/libc++_shared.so" -d /tmp/apkcheck 2>/dev/null || true
+          if [ -f /tmp/apkcheck/lib/arm64-v8a/libc++_shared.so ]; then
+            READELF=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" -name "llvm-readelf" | head -1)
+            if [ -n "$READELF" ]; then
+              echo "使用 llvm-readelf 检查符号..."
+              "$READELF" -sW /tmp/apkcheck/lib/arm64-v8a/libc++_shared.so | grep -i "monotonic_buffer_resource" && echo "✅ 找到 pmr 符号" || echo "❌ 未找到 pmr 符号（NDK 版本可能仍然不匹配）"
+            else
+              echo "未找到 llvm-readelf，跳过符号检查"
+            fi
+          fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
