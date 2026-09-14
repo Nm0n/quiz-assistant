@@ -220,6 +220,12 @@ jobs:
       # ============================================================
       # 执行打包
       # ============================================================
+      - name: Clean buildozer cache
+        run: |
+          rm -rf .buildozer
+          rm -rf ~/.buildozer
+          echo "已清理 .buildozer 缓存"
+      
       - name: Run pyside6-android-deploy
         id: deploy
         run: |
