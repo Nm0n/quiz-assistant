@@ -3,7 +3,8 @@
 # 关键设计：
 #   - 使用 PySide6 6.9.2，官方已对齐 p4a 与 wheel 的 Python 版本
 #   - 不再需要预克隆 p4a 或 sed 补丁
-#   - 不再需要手动指定 NDK 路径，pyside6-android-deploy 自动检测
+#   - NDK/SDK 路径通过 pysidedeploy.spec 传入，命令行不再需要 --ndk-path / --sdk-path
+#   - 手动装 cmdline-tools + 注入 JAXB + 建立 legacy 软链接
 
 name: Build Android APK
 
@@ -18,12 +19,11 @@ on:
 
 env:
   PYTHON_VERSION: '3.11'
-  # ========== 关键修改：升级到 6.9.2 ==========
   PYSIDE_VERSION: '6.9.2'
   ANDROID_SDK_VERSION: '33'
+  ANDROID_NDK_VERSION: '27.2.12479018'
   ANDROID_BUILD_TOOLS: '33.0.2'
   ANDROID_HOME: /usr/local/lib/android/sdk
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 jobs:
   build-apk:
@@ -68,7 +68,7 @@ jobs:
           java -version
 
       # ============================================================
-      # 手动装 cmdline-tools（pyside6-android-deploy 需要 sdkmanager）
+      # 手动装 cmdline-tools（sdkmanager 需要）
       # ============================================================
       - name: Manually install Android cmdline-tools
         run: |
@@ -133,6 +133,26 @@ jobs:
           yes | sdkmanager --licenses || true
 
       # ============================================================
+      # 安装 NDK r27c（与 PySide6 6.9.2 匹配）
+      # ============================================================
+      - name: Install Android NDK r27c
+        run: |
+          yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
+          test -d "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" || (echo "NDK 安装失败" && exit 1)
+          echo "NDK r27c 已安装"
+          echo "=== NDK 目录内容 ==="
+          ls "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}/" | head -20
+
+      - name: Export NDK env
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_PATH=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "=== 验证 NDK 环境变量 ==="
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
+
+      # ============================================================
       # 系统依赖
       # ============================================================
       - name: Install system dependencies
@@ -184,7 +204,9 @@ jobs:
           test -f qml/main.qml       || (echo "缺少 qml/main.qml" && exit 1)
 
       # ============================================================
-      # 【核心】运行 pyside6-android-deploy（不再需要 p4a 补丁）
+      # 【核心】运行 pyside6-android-deploy
+      #   NDK / SDK 路径通过 pysidedeploy.spec 传入，
+      #   命令行不再需要 --ndk-path 和 --sdk-path
       # ============================================================
       - name: Run pyside6-android-deploy
         run: |
@@ -200,6 +222,10 @@ jobs:
           java -version
           echo "======== PySide6 版本 ========"
           pip show PySide6 | grep -E "Version|Location" || true
+          echo "======== NDK 信息 ========"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "spec 中配置的 ndk_path=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}"
+          ls "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/" | grep -i "libc++" || true
           echo "============================"
 
           WHEEL_PYSIDE="wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
@@ -244,9 +270,9 @@ jobs:
           find . -type f -name "*.aab" 2>/dev/null || echo "未找到任何 AAB 文件"
 
       # ============================================================
-      # 校验 APK 内容
+      # 校验 APK 内容：重点检查 libpython3.11.so 是否存在
       # ============================================================
-      - name: Verify APK contains libpython and correct libc++_shared.so
+      - name: Verify APK contains libpython3.11.so and correct libc++_shared.so
         if: always()
         run: |
           APK=$(find dist -name "*.apk" | head -1)
@@ -255,6 +281,8 @@ jobs:
             exit 0
           fi
           echo "检查 APK: $APK"
+          echo "=== lib/arm64-v8a/ 完整清单 ==="
+          unzip -l "$APK" | grep "lib/arm64-v8a/" || true
           echo "=== libpython*.so ==="
           unzip -l "$APK" | grep -E "libpython3" || echo "!!! 未找到 libpython3.x.so !!!"
           echo "=== libshiboken*.so ==="
@@ -267,7 +295,7 @@ jobs:
           mkdir -p /tmp/apkcheck
           unzip -o "$APK" "lib/arm64-v8a/libc++_shared.so" -d /tmp/apkcheck 2>/dev/null || true
           if [ -f /tmp/apkcheck/lib/arm64-v8a/libc++_shared.so ]; then
-            READELF=$(find /usr/local/lib/android/sdk/ndk -name "llvm-readelf" 2>/dev/null | head -1)
+            READELF=$(find "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin" -name "llvm-readelf" 2>/dev/null | head -1)
             if [ -n "$READELF" ]; then
               echo "使用 llvm-readelf 检查符号..."
               "$READELF" -sW /tmp/apkcheck/lib/arm64-v8a/libc++_shared.so | grep -i "monotonic_buffer_resource" && echo "✅ 找到 pmr 符号" || echo "❌ 未找到 pmr 符号"
