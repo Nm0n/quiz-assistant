@@ -3,7 +3,7 @@
 # 关键设计：
 #   - 使用 PySide6 6.9.2，官方已对齐 p4a 与 wheel 的 Python 版本
 #   - 不再需要预克隆 p4a 或 sed 补丁
-#   - NDK/SDK 路径通过 pysidedeploy.spec 传入，命令行不再需要 --ndk-path / --sdk-path
+#   - 【关键】NDK/SDK 路径通过命令行 --ndk-path / --sdk-path 传入
 #   - 手动装 cmdline-tools + 注入 JAXB + 建立 legacy 软链接
 
 name: Build Android APK
@@ -205,8 +205,8 @@ jobs:
 
       # ============================================================
       # 【核心】运行 pyside6-android-deploy
-      #   NDK / SDK 路径通过 pysidedeploy.spec 传入，
-      #   命令行不再需要 --ndk-path 和 --sdk-path
+      #   NDK / SDK 路径必须通过命令行传入
+      #   spec 中的 ndk_path / sdk_path 在 6.9.2 中不会被读取
       # ============================================================
       - name: Run pyside6-android-deploy
         run: |
@@ -224,8 +224,8 @@ jobs:
           pip show PySide6 | grep -E "Version|Location" || true
           echo "======== NDK 信息 ========"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
-          echo "spec 中配置的 ndk_path=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}"
-          ls "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/" | grep -i "libc++" || true
+          echo "将传入 --ndk-path: $ANDROID_NDK_HOME"
+          ls "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/" | grep -i "libc++" || true
           echo "============================"
 
           WHEEL_PYSIDE="wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
@@ -239,6 +239,8 @@ jobs:
             --config-file pysidedeploy.spec \
             --wheel-pyside "$WHEEL_PYSIDE" \
             --wheel-shiboken "$WHEEL_SHIBOKEN" \
+            --ndk-path "$ANDROID_NDK_HOME" \
+            --sdk-path "$ANDROID_HOME" \
             2>&1 | tee build.log
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
@@ -290,7 +292,6 @@ jobs:
           echo "=== libc++_shared.so ==="
           unzip -l "$APK" | grep -E "libc\+\+_shared" || echo "!!! 未找到 libc++_shared.so !!!"
 
-          # 提取 APK 中的 libc++_shared.so，检查是否包含 pmr 符号
           echo "=== 检查 libc++_shared.so 是否包含 std::pmr 符号 ==="
           mkdir -p /tmp/apkcheck
           unzip -o "$APK" "lib/arm64-v8a/libc++_shared.so" -d /tmp/apkcheck 2>/dev/null || true
