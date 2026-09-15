@@ -58,17 +58,15 @@ class Question:
             explanation=data.get("explanation", ""),  # 缺失时默认空字符串
         )
 
-    @classmethod
+        @classmethod
     def create_from_excel_row(cls, q_type: str, stem: str, options: List[str],
-                              answer: str, explanation: str = "") -> 'Question':
+                              answer: str, explanation: str = "",
+                              is_favorite: bool = False,
+                              is_wrong: bool = False) -> 'Question':
         """
         从Excel行数据创建Question实例（工厂方法），自动生成哈希ID
-        :param q_type: 题型
-        :param stem: 题干
-        :param options: 选项列表（已过滤空选项）
-        :param answer: 标准化答案
-        :param explanation: 题目解析（可选，默认空字符串）
-        :return: Question实例
+        :param is_favorite: 是否收藏（默认False）
+        :param is_wrong: 是否为错题（默认False）
         """
         q_id = generate_question_id(stem, options)
         return cls(
@@ -77,8 +75,8 @@ class Question:
             stem=stem,
             options=options,
             answer=answer,
-            is_favorite=False,
-            is_wrong=False,
+            is_favorite=is_favorite,
+            is_wrong=is_wrong,
             user_answer="",
             is_answered=False,
             explanation=explanation,
