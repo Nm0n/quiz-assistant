@@ -427,6 +427,10 @@ def main():
         print("[QML] No QML file could be loaded", file=sys.stderr)
         sys.exit(-1)
 
+    # ===== 关键修复：启动 Qt 事件循环 =====
+    # 这会让应用持续运行，避免主线程退出导致对象销毁和线程崩溃
+    sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()
