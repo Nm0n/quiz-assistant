@@ -7,6 +7,7 @@
 #   - 全程 JDK 17
 #   - 手动装 cmdline-tools + 注入 JAXB + 建立 legacy 软链接
 #   - 【关键修改】NDK 升级到 r27c，与 PySide6 6.8.2 的 Qt 原生库对齐
+#   - 【新增】修正 APK 收集路径，增加调试信息，确保构建日志完整上传
 
 name: Build Android APK
 
@@ -242,15 +243,27 @@ jobs:
           echo "======== JAVA_HOME ========"
           echo "$JAVA_HOME"
           java -version
+
           echo "======== NDK 信息 ========"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
           ls "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/" | grep -i "libc++" || true
+
           echo "======== p4a 当前状态 ========"
-          grep -E "^[[:space:]]*version[[:space:]]*=" .buildozer/android/platform/python-for-android/pythonforandroid/recipes/python3/__init__.py || true
+          P4A_DIR="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android"
+          if [ -d "$P4A_DIR" ]; then
+            echo "p4a 目录存在: $P4A_DIR"
+            ls "$P4A_DIR" | head -10
+            grep -E "^[[:space:]]*version[[:space:]]*=" "$P4A_DIR/pythonforandroid/recipes/python3/__init__.py" || true
+          else
+            echo "!!! p4a 目录不存在: $P4A_DIR"
+          fi
           echo "============================"
 
           WHEEL_PYSIDE="wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
           WHEEL_SHIBOKEN="wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
+
+          echo "======== wheel 文件检查 ========"
+          ls -lh "$WHEEL_PYSIDE" "$WHEEL_SHIBOKEN"
 
           set +e
           pyside6-android-deploy \
@@ -272,8 +285,26 @@ jobs:
         if: always()
         run: |
           mkdir -p dist
-          find . -type f -name "*.apk" -not -path "./dist/*" -exec cp {} dist/ \; 2>/dev/null || true
-          ls -lh dist/ || true
+          # 在整个项目中查找 APK，排除 dist 和 .buildozer 目录自身
+          find . -type f -name "*.apk" \
+            -not -path "./dist/*" \
+            -not -path "./.buildozer/*" \
+            -exec cp {} dist/ \; 2>/dev/null || true
+          echo "=== dist/ 目录内容 ==="
+          ls -lh dist/ || echo "dist/ 目录为空"
+
+      # ============================================================
+      # 【新增】调试信息：列出项目根目录和所有 APK/AAB
+      # ============================================================
+      - name: List project root files for debugging
+        if: always()
+        run: |
+          echo "=== 项目根目录文件清单 ==="
+          ls -la
+          echo "=== 查找所有 APK 文件 ==="
+          find . -type f -name "*.apk" 2>/dev/null || echo "未找到任何 APK 文件"
+          echo "=== 查找所有 AAB 文件 ==="
+          find . -type f -name "*.aab" 2>/dev/null || echo "未找到任何 AAB 文件"
 
       # ============================================================
       # 【核心校验】检查 APK 里的 libpython 和 libc++_shared 版本
@@ -324,6 +355,7 @@ jobs:
           path: |
             build.log
             .buildozer/**/build.log
+            .buildozer/**/*.log
           if-no-files-found: warn
           retention-days: 7
 
