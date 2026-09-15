@@ -2,10 +2,10 @@
 #
 # 关键设计：
 #   - 使用 PySide6 6.9.2 + cp311 wheel
-#   - NDK/SDK 路径通过命令行 --ndk-path / --sdk-path 传入
-#   - 预克隆 p4a 并完整替换 Python 版本（version + md5sum + sha256）
-#   - 运行前后诊断独立成步骤，写入文件，随 artifact 上传
-#   - 每个步骤末尾只打印摘要，确保 GitHub Actions UI 中可见
+#   - 预克隆 p4a 使用 develop 分支（与 buildozer 期望一致）
+#   - 修改 buildozer/default.spec 加入 p4a.source_dir，强制 buildozer 使用我们的 p4a
+#   - 完整替换 recipe 中的 Python 版本（version + md5sum + sha256）
+#   - NDK/SDK 路径通过命令行传入
 
 name: Build Android APK
 
@@ -42,9 +42,6 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      # ============================================================
-      # 创建 venv
-      # ============================================================
       - name: Create and activate venv
         run: |
           python -m venv $HOME/venv
@@ -55,9 +52,6 @@ jobs:
           which python
           pip --version
 
-      # ============================================================
-      # JDK 17
-      # ============================================================
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -70,7 +64,7 @@ jobs:
           java -version
 
       # ============================================================
-      # cmdline-tools
+      # 手动装 cmdline-tools
       # ============================================================
       - name: Manually install Android cmdline-tools
         run: |
@@ -132,9 +126,6 @@ jobs:
             "build-tools;${ANDROID_BUILD_TOOLS}" || true
           yes | sdkmanager --licenses || true
 
-      # ============================================================
-      # NDK r27c
-      # ============================================================
       - name: Install Android NDK r27c
         run: |
           yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
@@ -198,7 +189,7 @@ jobs:
           test -f qml/main.qml       || (echo "缺少 qml/main.qml" && exit 1)
 
       # ============================================================
-      # 下载 Python 3.11.5 源码包并计算校验和
+      # 【核心 1/4】下载 Python 3.11.5 源码包并计算校验和
       # ============================================================
       - name: Download Python ${{ env.TARGET_PYTHON }} and compute checksums
         run: |
@@ -218,9 +209,12 @@ jobs:
           echo "SHA256 = $SHA256"
 
       # ============================================================
-      # 预克隆 p4a 并完整替换 Python 版本
+      # 【核心 2/4】预克隆 p4a（develop 分支）并完整替换 Python 版本引用
+      #   - 使用 develop 分支：与 buildozer 期望一致，避免被重新 clone
+      #   - version 改为 3.11.5
+      #   - md5sum / sha256 改为动态计算的值
       # ============================================================
-      - name: Pre-clone p4a and force Python ${{ env.TARGET_PYTHON }}
+      - name: Pre-clone p4a (develop branch) and force Python ${{ env.TARGET_PYTHON }}
         run: |
           set -e
           P4A_DIR="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android"
@@ -228,7 +222,8 @@ jobs:
           rm -rf "$GITHUB_WORKSPACE/.buildozer"
           mkdir -p "$(dirname "$P4A_DIR")"
 
-          git clone --depth 1 https://github.com/kivy/python-for-android.git "$P4A_DIR"
+          # 关键：使用 develop 分支，与 buildozer 期望一致
+          git clone --depth 1 -b develop --single-branch https://github.com/kivy/python-for-android.git "$P4A_DIR"
           cd "$P4A_DIR"
 
           echo "======== 修改前：grep 3.14 出现位置 ========"
@@ -253,78 +248,54 @@ jobs:
           done
 
           echo ""
-          echo "======== 最终检查：recipe 里是否还有 3.14 ========"
-          for RECIPE_NAME in python3 hostpython3; do
-            RECIPE_FILE="pythonforandroid/recipes/$RECIPE_NAME/__init__.py"
-            echo "---- $RECIPE_FILE ----"
-            grep -nE "3\.14" "$RECIPE_FILE" && echo "!!! 仍有 3.14 残留，需要检查 !!!" || echo "✅ 无 3.14 残留"
-          done
+          echo "======== 最终检查 ========"
+          grep -nE "^[[:space:]]*version[[:space:]]*=" "pythonforandroid/recipes/python3/__init__.py"
+          grep -nE "^[[:space:]]*version[[:space:]]*=" "pythonforandroid/recipes/hostpython3/__init__.py"
 
       # ============================================================
-      # 清理 p4a 构建缓存
+      # 【核心 3/4】修改 buildozer/default.spec，加入 p4a.source_dir
+      #   这样 pyside6-android-deploy 复制生成 buildozer.spec 时，
+      #   会自动带上 p4a.source_dir，让 buildozer 跳过 git clone
+      # ============================================================
+      - name: Patch buildozer default.spec to use our p4a
+        run: |
+          source $HOME/venv/bin/activate
+          DEFAULT_SPEC="$VIRTUAL_ENV/lib/python3.11/site-packages/buildozer/default.spec"
+
+          if [ ! -f "$DEFAULT_SPEC" ]; then
+            echo "!!! 找不到 default.spec: $DEFAULT_SPEC"
+            find "$VIRTUAL_ENV" -name "default.spec" 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "======== 修改前：default.spec 中 buildozer section ========"
+          grep -A 20 "^\[buildozer\]" "$DEFAULT_SPEC" || true
+
+          P4A_DIR="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android"
+
+          # 检查是否已有 p4a.source_dir
+          if grep -q "^p4a.source_dir" "$DEFAULT_SPEC"; then
+            sed -i "s|^p4a.source_dir.*|p4a.source_dir = ${P4A_DIR}|" "$DEFAULT_SPEC"
+          else
+            # 在 [buildozer] 段后插入 p4a.source_dir
+            sed -i "/^\[buildozer\]/a p4a.source_dir = ${P4A_DIR}" "$DEFAULT_SPEC"
+          fi
+
+          echo "======== 修改后：default.spec 中 buildozer section ========"
+          grep -A 20 "^\[buildozer\]" "$DEFAULT_SPEC" || true
+
+      # ============================================================
+      # 【核心 4/4】清理 p4a 构建缓存（防止复用旧 Python 二进制）
       # ============================================================
       - name: Clean p4a build cache
         run: |
-          set -e
           PLATFORM_DIR="$GITHUB_WORKSPACE/.buildozer/android/platform"
-
-          echo "======== 清理前：platform 目录内容 ========"
-          ls -la "$PLATFORM_DIR" || true
-
           find "$PLATFORM_DIR" -maxdepth 1 -type d -name "build-*" -exec rm -rf {} + 2>/dev/null || true
           rm -rf "$PLATFORM_DIR/python-for-android/dists" 2>/dev/null || true
           rm -rf "$PLATFORM_DIR/python-for-android/build" 2>/dev/null || true
           rm -rf "$PLATFORM_DIR/python-for-android/.buildozer" 2>/dev/null || true
-
-          echo "======== 清理后：platform 目录内容 ========"
+          echo "======== 清理后 platform 目录 ========"
           ls -la "$PLATFORM_DIR" || true
-
-          echo "======== 确认 p4a recipe 状态 ========"
-          grep -nE "^[[:space:]]*version[[:space:]]*=" "$PLATFORM_DIR/python-for-android/pythonforandroid/recipes/python3/__init__.py" || true
-
-      # ============================================================
-      # 【新增】运行前诊断：写入独立文件，供 artifact 上传
-      # ============================================================
-      - name: Pre-deploy diagnostics
-        run: |
-          DIAG="$GITHUB_WORKSPACE/pre-deploy-diagnostics.txt"
-          {
-            echo "============================================================"
-            echo "======== Pre-deploy Diagnostics ========"
-            echo "============================================================"
-            echo ""
-            echo "---- workspace platform 目录 ----"
-            ls -la "$GITHUB_WORKSPACE/.buildozer/android/platform" 2>&1 || true
-            echo ""
-            echo "---- workspace p4a recipe 状态 ----"
-            P4A_RECIPE="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android/pythonforandroid/recipes/python3/__init__.py"
-            if [ -f "$P4A_RECIPE" ]; then
-              grep -nE "^[[:space:]]*version[[:space:]]*=" "$P4A_RECIPE" || true
-            else
-              echo "!!! p4a recipe 文件不存在：$P4A_RECIPE"
-            fi
-            echo ""
-            echo "---- HOME 下可能的 buildozer 缓存 ----"
-            ls -la "$HOME/.buildozer" 2>&1 || echo "无 ~/.buildozer"
-            ls -la "$HOME/.pyside6-android-deploy" 2>&1 || echo "无 ~/.pyside6-android-deploy"
-            ls -la "$HOME/.local/share" 2>&1 | head -20 || echo "无 ~/.local/share"
-            echo ""
-            echo "---- 查找所有 python-for-android 目录 ----"
-            find / -type d -name "python-for-android" 2>/dev/null | head -20 || true
-            echo ""
-            echo "---- 查找所有 build-arm64-v8a 目录 ----"
-            find / -type d -name "build-arm64-v8a" 2>/dev/null | head -20 || true
-            echo ""
-            echo "---- 查找所有 libpython3.14.so ----"
-            find / -name "libpython3.14.so" 2>/dev/null | head -20 || true
-            echo ""
-            echo "---- 查找所有 libpython3.11.so ----"
-            find / -name "libpython3.11.so" 2>/dev/null | head -20 || true
-          } > "$DIAG" 2>&1
-
-          echo "======== 运行前诊断摘要（仅打印关键行）========"
-          grep -E "python-for-android|libpython3|version" "$DIAG" | head -20 || true
-          echo "（完整诊断见 artifact: pre-deploy-diagnostics.txt）"
 
       # ============================================================
       # 运行 pyside6-android-deploy
@@ -334,9 +305,11 @@ jobs:
           set -o pipefail
           source $HOME/venv/bin/activate
 
-          echo "======== 开始 pyside6-android-deploy ========"
-          echo "NDK: $ANDROID_NDK_HOME"
-          echo "SDK: $ANDROID_HOME"
+          echo "======== 运行前：p4a recipe 状态 ========"
+          grep -nE "^[[:space:]]*version[[:space:]]*=" "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android/pythonforandroid/recipes/python3/__init__.py" || true
+
+          echo "======== 运行前：default.spec 中的 p4a.source_dir ========"
+          grep "p4a.source_dir" "$VIRTUAL_ENV/lib/python3.11/site-packages/buildozer/default.spec" || true
 
           WHEEL_PYSIDE="wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
           WHEEL_SHIBOKEN="wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
@@ -351,69 +324,23 @@ jobs:
             2>&1 | tee build.log
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
-
           echo "pyside6-android-deploy 退出码: $EXIT_CODE"
           exit $EXIT_CODE
 
       # ============================================================
-      # 【新增】运行后诊断：独立步骤，always()，写入文件
+      # 运行后诊断
       # ============================================================
       - name: Post-deploy diagnostics
         if: always()
         run: |
-          DIAG="$GITHUB_WORKSPACE/post-deploy-diagnostics.txt"
-          {
-            echo "============================================================"
-            echo "======== Post-deploy Diagnostics ========"
-            echo "============================================================"
-            echo ""
-            echo "---- workspace platform 目录 ----"
-            ls -la "$GITHUB_WORKSPACE/.buildozer/android/platform" 2>&1 || true
-            echo ""
-            echo "---- deploy 之后：p4a recipe 状态 ----"
-            P4A_RECIPE="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android/pythonforandroid/recipes/python3/__init__.py"
-            if [ -f "$P4A_RECIPE" ]; then
-              grep -nE "^[[:space:]]*version[[:space:]]*=" "$P4A_RECIPE" || echo "未找到 version 行"
-            else
-              echo "!!! p4a recipe 文件不存在：$P4A_RECIPE"
-            fi
-            echo ""
-            echo "---- 查找所有 python-for-android 目录 ----"
-            find / -type d -name "python-for-android" 2>/dev/null | head -20 || true
-            echo ""
-            echo "---- 查找所有 build-arm64-v8a 目录 ----"
-            find / -type d -name "build-arm64-v8a" 2>/dev/null | head -20 || true
-            echo ""
-            echo "---- 查找所有 libpython3.14.so ----"
-            find / -name "libpython3.14.so" 2>/dev/null | head -20 || true
-            echo ""
-            echo "---- 查找所有 libpython3.11.so ----"
-            find / -name "libpython3.11.so" 2>/dev/null | head -20 || true
-            echo ""
-            echo "---- build.log 中 p4a 相关行 ----"
-            if [ -f "$GITHUB_WORKSPACE/build.log" ]; then
-              grep -nE "python-for-android|p4a|buildozer|Downloading Python|Building python" "$GITHUB_WORKSPACE/build.log" | head -80 || true
-            else
-              echo "build.log 不存在"
-            fi
-            echo ""
-            echo "---- build.log 中 Python 版本相关行 ----"
-            if [ -f "$GITHUB_WORKSPACE/build.log" ]; then
-              grep -nE "3\.14|3\.11" "$GITHUB_WORKSPACE/build.log" | head -60 || true
-            fi
-            echo ""
-            echo "---- build.log 末尾 100 行 ----"
-            if [ -f "$GITHUB_WORKSPACE/build.log" ]; then
-              tail -100 "$GITHUB_WORKSPACE/build.log" || true
-            fi
-            echo ""
-            echo "---- 所有 APK 文件 ----"
-            find "$GITHUB_WORKSPACE" -type f -name "*.apk" 2>/dev/null || true
-          } > "$DIAG" 2>&1
+          echo "======== deploy 后：p4a recipe 状态 ========"
+          grep -nE "^[[:space:]]*version[[:space:]]*=" "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android/pythonforandroid/recipes/python3/__init__.py" 2>/dev/null || echo "!!! recipe 文件不存在"
 
-          echo "======== 运行后诊断摘要（仅打印关键行）========"
-          grep -E "python-for-android|libpython3|version|3\.14|3\.11" "$DIAG" | head -20 || true
-          echo "（完整诊断见 artifact: post-deploy-diagnostics.txt）"
+          echo "======== 查找 libpython3.11.so ========"
+          find "$GITHUB_WORKSPACE" -name "libpython3.11.so" 2>/dev/null | head -10 || true
+
+          echo "======== 查找 libpython3.14.so ========"
+          find "$GITHUB_WORKSPACE" -name "libpython3.14.so" 2>/dev/null | head -10 || true
 
       # ============================================================
       # 收集 APK
@@ -427,14 +354,6 @@ jobs:
             -not -path "./.buildozer/*" \
             -exec cp {} dist/ \; 2>/dev/null || true
           ls -lh dist/ || echo "dist/ 目录为空"
-
-      - name: List project root files for debugging
-        if: always()
-        run: |
-          echo "=== 项目根目录 ==="
-          ls -la
-          echo "=== 查找所有 APK ==="
-          find . -type f -name "*.apk" 2>/dev/null || echo "未找到 APK"
 
       # ============================================================
       # 校验 APK 内容
@@ -455,24 +374,9 @@ jobs:
           if unzip -l "$APK" | grep -q "libpython3.11.so"; then
             echo "✅ APK 中包含 libpython3.11.so"
           elif unzip -l "$APK" | grep -q "libpython3.14.so"; then
-            echo "❌ APK 中仍然是 libpython3.14.so"
-            echo "   说明 p4a 仍然构建了 Python 3.14，recipe 补丁未生效或被缓存覆盖"
+            echo "❌ APK 中仍然是 libpython3.14.so —— p4a 补丁没有生效"
           else
             echo "❌ APK 中没有任何 libpython3.x.so"
-          fi
-
-          echo ""
-          echo "=== 检查 libc++_shared.so 是否包含 std::pmr 符号 ==="
-          mkdir -p /tmp/apkcheck
-          unzip -o "$APK" "lib/arm64-v8a/libc++_shared.so" -d /tmp/apkcheck 2>/dev/null || true
-          if [ -f /tmp/apkcheck/lib/arm64-v8a/libc++_shared.so ]; then
-            READELF=$(find "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin" -name "llvm-readelf" 2>/dev/null | head -1)
-            if [ -n "$READELF" ]; then
-              echo "使用 llvm-readelf 检查符号..."
-              "$READELF" -sW /tmp/apkcheck/lib/arm64-v8a/libc++_shared.so | grep -i "monotonic_buffer_resource" && echo "✅ 找到 pmr 符号" || echo "❌ 未找到 pmr 符号"
-            else
-              echo "未找到 llvm-readelf，跳过符号检查"
-            fi
           fi
 
       - name: Upload APK artifact
@@ -483,15 +387,13 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload build log and diagnostics (always)
+      - name: Upload build log (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ github.sha }}
           path: |
             build.log
-            pre-deploy-diagnostics.txt
-            post-deploy-diagnostics.txt
             .buildozer/**/build.log
             .buildozer/**/*.log
           if-no-files-found: warn
