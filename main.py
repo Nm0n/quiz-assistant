@@ -1,9 +1,3 @@
-# main.py
-# 移动端 / 跨平台入口：加载 QML，注册桥接对象，启动应用。
-#
-# core/ 前提：IO 方法接受 str 路径或 file-like 对象。
-# 桥接层把 QML 传来的字符串统一转成 core 能消费的「路径或流」。
-
 import io
 import os
 import sys
@@ -368,10 +362,37 @@ class ControllerBridge(QObject):
 # ==================================================================
 # 入口
 # ==================================================================
-def _qml_main_path():
+def _qml_candidates():
+    """
+    返回 QML 主文件的候选路径列表，按优先级排序。
+    Android 端和桌面端返回的内容不同，因为文件所在位置不同。
+    """
+    candidates = []
+
+    # 1) Qt 资源系统（qrc）—— 若打包时生成了 qrc 资源，这个优先级最高
+    candidates.append("qrc:/qml/main.qml")
+
+    # 2) Android assets 协议 —— pyside6-android-deploy 打包后的常见路径
+    candidates.append("assets:/qml/main.qml")
+
+    # 3) 文件系统路径（桌面端主用）
     base = os.path.dirname(os.path.abspath(__file__))
-    candidate = os.path.join(base, "qml", "main.qml")
-    return candidate if os.path.exists(candidate) else os.path.join(os.getcwd(), "qml", "main.qml")
+    candidates.append(os.path.join(base, "qml", "main.qml"))
+    candidates.append(os.path.join(base, "..", "qml", "main.qml"))
+    candidates.append(os.path.join(os.getcwd(), "qml", "main.qml"))
+
+    # 4) Android 应用私有目录（p4a 解压后的 app 目录）
+    if sys.platform == "android":
+        try:
+            from android import mActivity  # type: ignore
+            ctx = mActivity.getApplicationContext()
+            files_dir = ctx.getFilesDir().getAbsolutePath()
+            candidates.append(os.path.join(files_dir, "qml", "main.qml"))
+            candidates.append(os.path.join(files_dir, "app", "qml", "main.qml"))
+        except Exception as e:
+            print("[QML] android 私有目录探测失败：{}".format(e))
+
+    return candidates
 
 
 def main():
@@ -383,27 +404,27 @@ def main():
     bridge = ControllerBridge()
     engine.rootContext().setContextProperty("bridge", bridge)
 
-    # 尝试多种路径，取第一个能读到的
-    qml_candidates = [
-        "qrc:/qml/main.qml",                    # Android 资源路径
-        os.path.join(os.path.dirname(__file__), "qml", "main.qml"),
-        os.path.join(os.getcwd(), "qml", "main.qml"),
-    ]
     loaded = False
-    for path in qml_candidates:
-        if path.startswith("qrc:/"):
+    for path in _qml_candidates():
+        print("[QML] Trying: {}".format(path))
+
+        if path.startswith("qrc:/") or path.startswith("assets:/"):
             engine.load(QUrl(path))
         else:
-            if os.path.exists(path):
-                engine.load(QUrl.fromLocalFile(path))
-            else:
+            if not os.path.exists(path):
+                print("[QML] Not found: {}".format(path))
                 continue
+            engine.load(QUrl.fromLocalFile(path))
+
         if engine.rootObjects():
+            print("[QML] Loaded successfully: {}".format(path))
             loaded = True
             break
+        else:
+            print("[QML] Load failed: {}".format(path))
 
     if not loaded:
-        sys.stderr.write("QML 加载失败\n")
+        print("[QML] No QML file could be loaded", file=sys.stderr)
         sys.exit(-1)
 
 
