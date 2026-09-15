@@ -58,7 +58,7 @@ class Question:
             explanation=data.get("explanation", ""),  # 缺失时默认空字符串
         )
 
-        @classmethod
+    @classmethod
     def create_from_excel_row(cls, q_type: str, stem: str, options: List[str],
                               answer: str, explanation: str = "",
                               is_favorite: bool = False,
