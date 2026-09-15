@@ -70,7 +70,7 @@ class DataManager:
 
         questions = []
         for idx, row in df.iterrows():
-            row = {k: (str(v).strip() if v is not None else "") for k, v in row.items()}
+            row = {k: ("" if v is None or pd.isna(v) else str(v).strip()) for k, v in row.items()}
 
             if not row.get("题干", "").strip():
                 continue
@@ -89,7 +89,16 @@ class DataManager:
                 if val:
                     explanation = val
                     break
-           
+           # ========== 读取收藏/错题列（新增） ==========
+            def parse_bool_mark(val):
+                """识别各种常见标记写法为 True"""
+                if not val:
+                    return False
+                s = str(val).strip().lower()
+                return s in ["1", "true", "yes", "y", "是", "√", "✓", "对", "v", "x", "✓"]
+
+            is_favorite = parse_bool_mark(row.get("收藏", ""))
+            is_wrong = parse_bool_mark(row.get("错题", ""))
             # ==========================================================
 
             # 收集所有非空选项（A~F）
@@ -121,7 +130,9 @@ class DataManager:
                 stem=stem,
                 options=options,
                 answer=answer,
-                explanation=explanation,                
+                explanation=explanation,
+                is_favorite=is_favorite,   # ← 新增
+                is_wrong=is_wrong,         # ← 新增
             )
             questions.append(question)
 
