@@ -1,10 +1,10 @@
 # .github/workflows/build-apk.yml
 #
-# 关键设计：
+# 完整版：包含所有诊断步骤 + 后台监控脚本
 #   - 使用 PySide6 6.9.2 + cp311 wheel
-#   - 预克隆 p4a 到【两个位置】并打补丁（阻止 pyside6-android-deploy 自己的 clone）
+#   - 预克隆 p4a 到两个位置并打补丁
 #   - 修改 buildozer/default.spec 加入 p4a.source_dir
-#   - 完整替换 recipe 中的 Python 版本（version + md5sum + sha256）
+#   - 后台监控脚本：在 pyside6-android-deploy 运行时持续监视 p4a，发现 3.14 立即改为 3.11.5
 #   - NDK/SDK 路径通过命令行传入
 
 name: Build Android APK
@@ -207,7 +207,7 @@ jobs:
           test -f qml/main.qml       || (echo "缺少 qml/main.qml" && exit 1)
 
       # ============================================================
-      # 【核心 1/5】下载 Python 3.11.5 源码包并计算校验和
+      # 【核心 1/6】下载 Python 3.11.5 源码包并计算校验和
       # ============================================================
       - name: Download Python ${{ env.TARGET_PYTHON }} and compute checksums
         run: |
@@ -227,12 +227,7 @@ jobs:
           echo "SHA256 = $SHA256"
 
       # ============================================================
-      # 【核心 2/5】预克隆 p4a 到【两个位置】并完整替换 Python 版本引用
-      #   - 位置 A: $GITHUB_WORKSPACE/python-for-android
-      #             pyside6-android-deploy 会自己 clone 到这个位置
-      #   - 位置 B: $GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android
-      #             buildozer 默认位置
-      #   两个位置内容相同，都打了补丁
+      # 【核心 2/6】预克隆 p4a 到两个位置并打补丁
       # ============================================================
       - name: Pre-clone p4a to both locations and patch
         run: |
@@ -290,7 +285,7 @@ jobs:
           echo "位置 B p4a: $(test -d "$P4A_DIR_B" && echo 存在 || echo 不存在)"
 
       # ============================================================
-      # 【核心 3/5】修改 buildozer/default.spec，加入 p4a.source_dir
+      # 【核心 3/6】修改 buildozer/default.spec，加入 p4a.source_dir
       # ============================================================
       - name: Patch buildozer default.spec to use our p4a
         run: |
@@ -318,7 +313,7 @@ jobs:
           grep -A 20 "^\[buildozer\]" "$DEFAULT_SPEC" || true
 
       # ============================================================
-      # 【核心 4/5】清理 p4a 构建缓存
+      # 【核心 4/6】清理 p4a 构建缓存
       # ============================================================
       - name: Clean p4a build cache
         run: |
@@ -339,7 +334,61 @@ jobs:
           grep -nE "^[[:space:]]*version[[:space:]]*=" "$PLATFORM_DIR/python-for-android/pythonforandroid/recipes/python3/__init__.py" || true
 
       # ============================================================
-      # 【核心 5/5】运行 pyside6-android-deploy
+      # 【核心 5/6】启动后台监控脚本
+      #   它会在整个 workflow 运行期间持续监视 p4a 目录，
+      #   一旦 buildozer 重新 clone 出现 3.14 recipe，立即修改。
+      #   脚本在最后一步被 kill，或者在构建结束前一直运行。
+      # ============================================================
+      - name: Start background p4a patcher
+        run: |
+          PATCHER_SCRIPT="$GITHUB_WORKSPACE/p4a_patcher.sh"
+
+          cat > "$PATCHER_SCRIPT" <<'PATCHER_EOF'
+          #!/bin/bash
+          # 持续监视 p4a 目录，一旦发现 3.14 recipe 立即修改
+          LOG="/tmp/patcher.log"
+          echo "[Patcher] 启动于 $(date)" > "$LOG"
+
+          while true; do
+            # 查找所有 p4a 目录（不限于 workspace）
+            for P4A_DIR in \
+              "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" \
+              "$GITHUB_WORKSPACE/python-for-android" \
+              "$HOME/.buildozer/android/platform/python-for-android" \
+              "$HOME/.buildozer/android/platform/build-arm64-v8a/build/other_builds/hostpython3" \
+              "$HOME/.buildozer/android/platform/build-arm64-v8a/build/other_builds/python3" ; do
+              if [ -d "$P4A_DIR" ]; then
+                for RECIPE_REL in "pythonforandroid/recipes/python3/__init__.py" "pythonforandroid/recipes/hostpython3/__init__.py" ; do
+                  RECIPE_FILE="$P4A_DIR/$RECIPE_REL"
+                  if [ -f "$RECIPE_FILE" ] && grep -qE "3\.14" "$RECIPE_FILE"; then
+                    echo "[Patcher] $(date) 检测到 3.14: $RECIPE_FILE" >> "$LOG"
+                    sed -i -E "s/version = '3\.14\.[0-9]+'/version = '${TARGET_PYTHON}'/" "$RECIPE_FILE"
+                    sed -i -E "s/version = \"3\.14\.[0-9]+\"/version = '${TARGET_PYTHON}'/" "$RECIPE_FILE"
+                    sed -i -E "s/md5sum = '[a-fA-F0-9]+'/md5sum = '${PY_TARBALL_MD5}'/" "$RECIPE_FILE"
+                    sed -i -E "s/sha256 = '[a-fA-F0-9]+'/sha256 = '${PY_TARBALL_SHA256}'/" "$RECIPE_FILE"
+                    echo "[Patcher] $(date) 修改完成" >> "$LOG"
+                  fi
+                done
+              fi
+            done
+            sleep 1
+          done
+          PATCHER_EOF
+
+          chmod +x "$PATCHER_SCRIPT"
+
+          # 后台运行 patcher
+          nohup "$PATCHER_SCRIPT" > /dev/null 2>&1 &
+          echo "$!" > /tmp/patcher.pid
+          echo "Patcher PID: $(cat /tmp/patcher.pid)"
+
+          # 等待 3 秒确认 patcher 已启动
+          sleep 3
+          echo "======== Patcher 启动日志 ========"
+          cat /tmp/patcher.log || true
+
+      # ============================================================
+      # 【核心 6/6】运行 pyside6-android-deploy
       # ============================================================
       - name: Run pyside6-android-deploy
         run: |
@@ -357,6 +406,7 @@ jobs:
           pip show PySide6 | grep -E "Version|Location" || true
           echo "======== NDK 信息 ========"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "将传入 --ndk-path: $ANDROID_NDK_HOME"
           ls "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/" | grep -i "libc++" || true
 
           echo "======== 运行前：位置 A p4a recipe ========"
@@ -392,18 +442,47 @@ jobs:
       - name: Post-deploy diagnostics
         if: always()
         run: |
+          echo "======== Patcher 日志 ========"
+          cat /tmp/patcher.log || echo "无 patcher 日志"
+
           echo "======== deploy 后：位置 A p4a recipe ========"
           grep -nE "^[[:space:]]*version[[:space:]]*=" "$GITHUB_WORKSPACE/python-for-android/pythonforandroid/recipes/python3/__init__.py" 2>/dev/null || echo "位置 A 不存在"
+
           echo "======== deploy 后：位置 B p4a recipe ========"
           grep -nE "^[[:space:]]*version[[:space:]]*=" "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android/pythonforandroid/recipes/python3/__init__.py" 2>/dev/null || echo "位置 B 不存在"
 
-          echo "======== 查找构建出来的 libpython*.so ========"
-          find "$GITHUB_WORKSPACE" -name "libpython3*.so" 2>/dev/null | head -20 || true
+          echo "======== deploy 后：查找所有 python-for-android 目录 ========"
+          find / -type d -name "python-for-android" 2>/dev/null | head -20 || true
+
+          echo "======== deploy 后：查找所有 libpython3.14.so ========"
+          find / -name "libpython3.14.so" 2>/dev/null | head -20 || true
+
+          echo "======== deploy 后：查找所有 libpython3.11.so ========"
+          find / -name "libpython3.11.so" 2>/dev/null | head -20 || true
 
           echo "======== build.log 中 p4a 相关行 ========"
           if [ -f "$GITHUB_WORKSPACE/build.log" ]; then
-            grep -nE "python-for-android|p4a|buildozer|Cloning" "$GITHUB_WORKSPACE/build.log" | head -60 || true
+            grep -nE "python-for-android|p4a|buildozer|Cloning|3\.14|3\.11" "$GITHUB_WORKSPACE/build.log" | head -80 || true
           fi
+
+          echo "======== build.log 末尾 50 行 ========"
+          if [ -f "$GITHUB_WORKSPACE/build.log" ]; then
+            tail -50 "$GITHUB_WORKSPACE/build.log" || true
+          fi
+
+      # ============================================================
+      # 停止后台 patcher
+      # ============================================================
+      - name: Stop background p4a patcher
+        if: always()
+        run: |
+          if [ -f /tmp/patcher.pid ]; then
+            PID=$(cat /tmp/patcher.pid)
+            kill "$PID" 2>/dev/null || true
+            echo "已停止 Patcher PID: $PID"
+          fi
+          echo "======== 最终 Patcher 日志 ========"
+          cat /tmp/patcher.log || echo "无 patcher 日志"
 
       # ============================================================
       # 收集 APK
@@ -454,6 +533,17 @@ jobs:
             echo "❌ APK 中没有任何 libpython3.x.so"
           fi
 
+          echo "=== 检查 libc++_shared.so 是否包含 std::pmr 符号 ==="
+          mkdir -p /tmp/apkcheck
+          unzip -o "$APK" "lib/arm64-v8a/libc++_shared.so" -d /tmp/apkcheck 2>/dev/null || true
+          if [ -f /tmp/apkcheck/lib/arm64-v8a/libc++_shared.so ]; then
+            READELF=$(find "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin" -name "llvm-readelf" 2>/dev/null | head -1)
+            if [ -n "$READELF" ]; then
+              echo "使用 llvm-readelf 检查符号..."
+              "$READELF" -sW /tmp/apkcheck/lib/arm64-v8a/libc++_shared.so | grep -i "monotonic_buffer_resource" && echo "✅ 找到 pmr 符号" || echo "❌ 未找到 pmr 符号"
+            fi
+          fi
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -462,13 +552,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload build log (always)
+      - name: Upload build log and patcher log (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ github.sha }}
           path: |
             build.log
+            /tmp/patcher.log
             .buildozer/**/build.log
             .buildozer/**/*.log
           if-no-files-found: warn
