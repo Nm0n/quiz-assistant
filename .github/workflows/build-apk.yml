@@ -339,10 +339,15 @@ jobs:
           ls "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/" | grep -i "libc++" || true
 
           echo "======== 运行前：workspace platform 目录 ========"
-          ls -la "$GITHUB_WORKSPACE/.buildozer/android/platform" 2>/dev/null || echo "无 workspace/.buildozer/android/platform"
+          ls -la "$GITHUB_WORKSPACE/.buildozer/android/platform" || true
 
           echo "======== 运行前：workspace p4a recipe 状态 ========"
-          grep -nE "^[[:space:]]*version[[:space:]]*=" "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android/pythonforandroid/recipes/python3/__init__.py" 2>/dev/null || echo "无 workspace p4a recipe"
+          P4A_RECIPE="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android/pythonforandroid/recipes/python3/__init__.py"
+          if [ -f "$P4A_RECIPE" ]; then
+            grep -nE "^[[:space:]]*version[[:space:]]*=" "$P4A_RECIPE" || true
+          else
+            echo "!!! p4a recipe 文件不存在：$P4A_RECIPE"
+          fi
 
           echo "======== 运行前：HOME 下可能的 buildozer 缓存 ========"
           ls -la "$HOME/.buildozer" 2>/dev/null || echo "无 ~/.buildozer"
@@ -350,20 +355,20 @@ jobs:
           ls -la "$HOME/.local/share" 2>/dev/null | head -20 || echo "无 ~/.local/share"
 
           echo "======== 运行前：查找所有 python-for-android 目录 ========"
-          find / -type d -name "python-for-android" 2>/dev/null | head -20
+          find / -type d -name "python-for-android" 2>/dev/null | head -20 || true
 
-          echo "======== 运行前：查找所有 libpython3*.so ========"
-          find / -name "libpython3*.so" 2>/dev/null | head -20 || echo "未找到任何 libpython3*.so"
+          echo "======== 运行前：查找所有 build-arm64-v8a 目录 ========"
+          find / -type d -name "build-arm64-v8a" 2>/dev/null | head -20 || true
+
+          echo "============================================================"
+          echo "======== 开始 pyside6-android-deploy ========"
+          echo "============================================================"
 
           WHEEL_PYSIDE="wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
           WHEEL_SHIBOKEN="wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
 
           echo "======== wheel 文件检查 ========"
           ls -lh "$WHEEL_PYSIDE" "$WHEEL_SHIBOKEN"
-
-          echo "============================================================"
-          echo "======== 开始运行 pyside6-android-deploy ========"
-          echo "============================================================"
 
           set +e
           pyside6-android-deploy \
@@ -376,39 +381,39 @@ jobs:
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
 
-          echo "============================================================"
-          echo "======== pyside6-android-deploy 退出码: $EXIT_CODE ========"
-          echo "============================================================"
+          echo "pyside6-android-deploy 退出码: $EXIT_CODE"
 
           echo "============================================================"
           echo "======== 运行后诊断 ========"
           echo "============================================================"
 
-          echo "======== 运行后：workspace p4a recipe 状态 ========"
-          P4A_RECIPE="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android/pythonforandroid/recipes/python3/__init__.py"
+          echo "======== deploy 之后：p4a recipe 状态 ========"
           if [ -f "$P4A_RECIPE" ]; then
             grep -nE "^[[:space:]]*version[[:space:]]*=" "$P4A_RECIPE" || echo "未找到 version 行"
           else
             echo "!!! p4a recipe 文件不存在：$P4A_RECIPE"
           fi
 
-          echo "======== 运行后：查找所有 python-for-android 目录 ========"
-          find / -type d -name "python-for-android" 2>/dev/null | head -20
+          echo "======== 查找所有 python-for-android 目录 ========"
+          find / -type d -name "python-for-android" 2>/dev/null | head -20 || true
 
-          echo "======== 运行后：查找所有 build-arm64-v8a 目录 ========"
-          find / -type d -name "build-arm64-v8a" 2>/dev/null | head -20
+          echo "======== 查找所有 build-arm64-v8a 目录 ========"
+          find / -type d -name "build-arm64-v8a" 2>/dev/null | head -20 || true
 
-          echo "======== 运行后：查找所有 libpython3.14.so ========"
-          find / -name "libpython3.14.so" 2>/dev/null | head -20 || echo "未找到 libpython3.14.so"
+          echo "======== 查找所有 libpython3.14.so ========"
+          find / -name "libpython3.14.so" 2>/dev/null | head -20 || true
 
-          echo "======== 运行后：查找所有 libpython3.11.so ========"
-          find / -name "libpython3.11.so" 2>/dev/null | head -20 || echo "未找到 libpython3.11.so"
+          echo "======== 查找所有 libpython3.11.so ========"
+          find / -name "libpython3.11.so" 2>/dev/null | head -20 || true
 
-          echo "======== 运行后：build.log 中的 p4a 相关行 ========"
-          grep -nE "python-for-android|p4a|\.buildozer|buildozer" build.log | head -60 || echo "build.log 中没有 p4a 相关行"
+          echo "======== build.log 中的 p4a 相关行 ========"
+          grep -nE "python-for-android|p4a|buildozer" build.log | head -60 || true
 
-          echo "======== 运行后：build.log 中的 Python 下载相关行 ========"
-          grep -nE "Downloading Python|Python-3\.|cpython|libpython" build.log | head -40 || echo "build.log 中没有 Python 下载相关行"
+          echo "======== deploy 后：workspace platform 目录 ========"
+          ls -la "$GITHUB_WORKSPACE/.buildozer/android/platform" || true
+
+          echo "======== deploy 后：查找所有 APK ========"
+          find "$GITHUB_WORKSPACE" -type f -name "*.apk" 2>/dev/null || true
 
           exit $EXIT_CODE
 
