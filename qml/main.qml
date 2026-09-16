@@ -40,6 +40,10 @@ ApplicationWindow {
     readonly property bool shuffleEnabled:
         viewState ? viewState.shuffleEnabled : false
 
+    // Excel 导入开关：Android 端 pandas/openpyxl 不可用，默认禁用。
+    // 若未来在桌面端启用，把 false 改为 true 即可。
+    readonly property bool excelImportEnabled: false
+
     title: "智能刷题助手 - " + fileLabel + modifiedMark
 
     // ============================================================
@@ -119,17 +123,26 @@ ApplicationWindow {
 
     // ============================================================
     // 文件对话框
-    // 直接把 selectedFile.toString() 传给 Python：
-    //   桌面 → file:///D:/xxx.json
-    //   Android → content://...
-    // 由 Python 侧 QUrl / QFile 统一解析。
+    // 【Android 兼容性修复】
+    //   1) onAccepted / onRejected 里显式 close()，确保对话框真正关闭
+    //   2) 每次打开前清空 selectedFile，避免上次的选择残留
+    //   3) 通过 openFileDialogTimer 延迟打开，避开 Drawer 关闭动画
     // ============================================================
     FileDialog {
         id: openJsonDialog
         title: "选择题库文件"
         nameFilters: ["JSON 文件 (*.json)", "所有文件 (*)"]
         onAccepted: {
-            bridge.loadFromJson(selectedFile.toString())
+            var path = selectedFile.toString()
+            console.log("[FileDialog] openJson accepted: " + path)
+            close()
+            selectedFile = null
+            bridge.loadFromJson(path)
+        }
+        onRejected: {
+            console.log("[FileDialog] openJson rejected")
+            close()
+            selectedFile = null
         }
     }
 
@@ -140,7 +153,16 @@ ApplicationWindow {
         nameFilters: ["JSON 文件 (*.json)"]
         defaultSuffix: "json"
         onAccepted: {
-            bridge.saveToFile(selectedFile.toString())
+            var path = selectedFile.toString()
+            console.log("[FileDialog] saveJson accepted: " + path)
+            close()
+            selectedFile = null
+            bridge.saveToFile(path)
+        }
+        onRejected: {
+            console.log("[FileDialog] saveJson rejected")
+            close()
+            selectedFile = null
         }
     }
 
@@ -149,7 +171,37 @@ ApplicationWindow {
         title: "选择 Excel 文件（Android 端可能不可用）"
         nameFilters: ["Excel 文件 (*.xlsx *.xls)", "所有文件 (*)"]
         onAccepted: {
-            bridge.loadFromExcel(selectedFile.toString())
+            var path = selectedFile.toString()
+            console.log("[FileDialog] importExcel accepted: " + path)
+            close()
+            selectedFile = null
+            bridge.loadFromExcel(path)
+        }
+        onRejected: {
+            console.log("[FileDialog] importExcel rejected")
+            close()
+            selectedFile = null
+        }
+    }
+
+    // ============================================================
+    // 【新增】延迟打开 FileDialog 的中介 Timer
+    //   原因：Drawer 关闭有 300ms 动画，与 FileDialog.open() 同时发生
+    //        在 Android 上会让系统文件选择器 Activity 启动失败。
+    //   做法：先关闭 Drawer，350ms 后再打开 FileDialog。
+    // ============================================================
+    Timer {
+        id: openFileDialogTimer
+        property var targetDialog: null
+
+        interval: 350
+        repeat: false
+
+        onTriggered: {
+            if (targetDialog) {
+                targetDialog.selectedFile = null  // 关键：重置上次选择
+                targetDialog.open()
+            }
         }
     }
 
@@ -195,6 +247,7 @@ ApplicationWindow {
         }
         var ok = bridge.saveCurrent()
         if (!ok) {
+            saveJsonDialog.selectedFile = null  // 关键：重置
             saveJsonDialog.open()
         }
     }
@@ -266,7 +319,11 @@ ApplicationWindow {
             MenuEntry {
                 width: menuColumn.width
                 label: "打开题库"
-                onClicked: { menuDrawer.close(); openJsonDialog.open() }
+                onClicked: {
+                    menuDrawer.close()
+                    openFileDialogTimer.targetDialog = openJsonDialog
+                    openFileDialogTimer.start()
+                }
             }
             MenuEntry {
                 width: menuColumn.width
@@ -276,12 +333,22 @@ ApplicationWindow {
             MenuEntry {
                 width: menuColumn.width
                 label: "另存为"
-                onClicked: { menuDrawer.close(); saveJsonDialog.open() }
+                onClicked: {
+                    menuDrawer.close()
+                    openFileDialogTimer.targetDialog = saveJsonDialog
+                    openFileDialogTimer.start()
+                }
             }
             MenuEntry {
                 width: menuColumn.width
                 label: "导入 Excel"
-                onClicked: { menuDrawer.close(); importExcelDialog.open() }
+                visible: appWindow.excelImportEnabled
+                height: appWindow.excelImportEnabled ? 46 : 0
+                onClicked: {
+                    menuDrawer.close()
+                    openFileDialogTimer.targetDialog = importExcelDialog
+                    openFileDialogTimer.start()
+                }
             }
 
             MenuSection { width: menuColumn.width; text: "📚 刷题模式" }
@@ -315,7 +382,7 @@ ApplicationWindow {
             Item { width: 1; height: 12 }
             Text {
                 width: menuColumn.width
-                text: "提示：Android 端推荐仅使用 JSON 题库；\nExcel 导入依赖 pandas / openpyxl，可能不可用。"
+                text: "提示：Android 端仅支持 JSON 题库。"
                 wrapMode: Text.WordWrap
                 font.pixelSize: 11
                 color: "#909399"
@@ -523,7 +590,12 @@ ApplicationWindow {
             FlatButton {
                 Layout.fillWidth: true
                 text: "📂 Excel"
-                onClicked: importExcelDialog.open()
+                visible: appWindow.excelImportEnabled
+                Layout.preferredWidth: appWindow.excelImportEnabled ? -1 : 0
+                onClicked: {
+                    importExcelDialog.selectedFile = null
+                    importExcelDialog.open()
+                }
             }
         }
 
