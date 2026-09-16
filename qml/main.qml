@@ -20,9 +20,6 @@ ApplicationWindow {
     // ============================================================
     readonly property var viewState: bridge.viewState
 
-    // currentQuestion 是唯一真相来源：
-    //   直接基于 viewState 判断，避免独立的 hasQuestion 绑定
-    //   与 currentQuestion 绑定求值顺序不一致导致短暂 null。
     readonly property var currentQuestion: {
         var s = viewState
         if (s && s.hasQuestion && s.question && s.question.id)
@@ -40,8 +37,6 @@ ApplicationWindow {
     readonly property bool shuffleEnabled:
         viewState ? viewState.shuffleEnabled : false
 
-    // Excel 导入开关：Android 端 pandas/openpyxl 不可用，默认禁用。
-    // 若未来在桌面端启用，把 false 改为 true 即可。
     readonly property bool excelImportEnabled: false
 
     title: "智能刷题助手 - " + fileLabel + modifiedMark
@@ -123,26 +118,24 @@ ApplicationWindow {
 
     // ============================================================
     // 文件对话框
-    // 【Android 兼容性修复】
-    //   1) onAccepted / onRejected 里显式 close()，确保对话框真正关闭
-    //   2) 每次打开前清空 selectedFile，避免上次的选择残留
-    //   3) 通过 openFileDialogTimer 延迟打开，避开 Drawer 关闭动画
     // ============================================================
     FileDialog {
         id: openJsonDialog
         title: "选择题库文件"
         nameFilters: ["JSON 文件 (*.json)", "所有文件 (*)"]
+
         onAccepted: {
             var path = selectedFile.toString()
             console.log("[FileDialog] openJson accepted: " + path)
-            close()
-            selectedFile = null
+            // 注意：onAccepted 触发时，对话框已经在关闭过程中，
+            // 不要再手动调用 close() 或 selectedFile = null，否则 Android 上可能异常。
             bridge.loadFromJson(path)
         }
         onRejected: {
             console.log("[FileDialog] openJson rejected")
-            close()
-            selectedFile = null
+        }
+        onVisibleChanged: {
+            console.log("[FileDialog] openJson visible = " + visible)
         }
     }
 
@@ -152,17 +145,17 @@ ApplicationWindow {
         fileMode: FileDialog.SaveFile
         nameFilters: ["JSON 文件 (*.json)"]
         defaultSuffix: "json"
+
         onAccepted: {
             var path = selectedFile.toString()
             console.log("[FileDialog] saveJson accepted: " + path)
-            close()
-            selectedFile = null
             bridge.saveToFile(path)
         }
         onRejected: {
             console.log("[FileDialog] saveJson rejected")
-            close()
-            selectedFile = null
+        }
+        onVisibleChanged: {
+            console.log("[FileDialog] saveJson visible = " + visible)
         }
     }
 
@@ -170,37 +163,37 @@ ApplicationWindow {
         id: importExcelDialog
         title: "选择 Excel 文件（Android 端可能不可用）"
         nameFilters: ["Excel 文件 (*.xlsx *.xls)", "所有文件 (*)"]
+
         onAccepted: {
             var path = selectedFile.toString()
             console.log("[FileDialog] importExcel accepted: " + path)
-            close()
-            selectedFile = null
             bridge.loadFromExcel(path)
         }
         onRejected: {
             console.log("[FileDialog] importExcel rejected")
-            close()
-            selectedFile = null
         }
     }
 
     // ============================================================
-    // 【新增】延迟打开 FileDialog 的中介 Timer
-    //   原因：Drawer 关闭有 300ms 动画，与 FileDialog.open() 同时发生
-    //        在 Android 上会让系统文件选择器 Activity 启动失败。
-    //   做法：先关闭 Drawer，350ms 后再打开 FileDialog。
+    // 延迟打开 FileDialog 的中介 Timer
+    //   把间隔从 350ms 增加到 700ms，避免 Drawer 动画期间
+    //   Android 系统忽略 startActivityForResult。
+    //   使用 visible = true 而不是 open()，兼容性更好。
     // ============================================================
     Timer {
         id: openFileDialogTimer
         property var targetDialog: null
 
-        interval: 350
+        interval: 700
         repeat: false
 
         onTriggered: {
-            if (targetDialog) {
-                targetDialog.selectedFile = null  // 关键：重置上次选择
-                targetDialog.open()
+            if (!targetDialog) return
+            try {
+                targetDialog.visible = true
+                console.log("[Timer] opened dialog: " + targetDialog)
+            } catch (e) {
+                console.log("[Timer] open dialog failed: " + e)
             }
         }
     }
@@ -247,8 +240,8 @@ ApplicationWindow {
         }
         var ok = bridge.saveCurrent()
         if (!ok) {
-            saveJsonDialog.selectedFile = null  // 关键：重置
-            saveJsonDialog.open()
+            openFileDialogTimer.targetDialog = saveJsonDialog
+            openFileDialogTimer.start()
         }
     }
 
@@ -400,7 +393,6 @@ ApplicationWindow {
         anchors.margins: 12
         spacing: 8
 
-        // -------- 题号 + 收藏/错题标签 --------
         RowLayout {
             Layout.fillWidth: true
             spacing: 8
@@ -445,7 +437,6 @@ ApplicationWindow {
             Item { Layout.fillWidth: true }
         }
 
-        // -------- 收藏 / 错题 / 记忆 按钮 --------
         RowLayout {
             Layout.fillWidth: true
             spacing: 8
@@ -484,7 +475,6 @@ ApplicationWindow {
             }
         }
 
-        // -------- 进度条 --------
         ProgressBar {
             id: progressBar
             Layout.fillWidth: true
@@ -511,7 +501,6 @@ ApplicationWindow {
             }
         }
 
-        // -------- 题目面板 --------
         QuestionPanel {
             id: questionPanel
             Layout.fillWidth: true
@@ -528,7 +517,6 @@ ApplicationWindow {
             }
         }
 
-        // -------- 上一题 / 下一题 --------
         RowLayout {
             Layout.fillWidth: true
             spacing: 8
@@ -547,7 +535,6 @@ ApplicationWindow {
             }
         }
 
-        // -------- 提交 / 乱序 / Excel --------
         RowLayout {
             Layout.fillWidth: true
             spacing: 8
@@ -555,8 +542,6 @@ ApplicationWindow {
             PrimaryButton {
                 Layout.fillWidth: true
                 text: "提交答案"
-                // ★ 用显式块体 + 局部变量缓存，避免多行 && 在绑定引擎中
-                //   对 currentQuestion 反复求值导致的时序错位。
                 enabled: {
                     var q = appWindow.currentQuestion
                     if (!q) return false
@@ -593,13 +578,12 @@ ApplicationWindow {
                 visible: appWindow.excelImportEnabled
                 Layout.preferredWidth: appWindow.excelImportEnabled ? -1 : 0
                 onClicked: {
-                    importExcelDialog.selectedFile = null
-                    importExcelDialog.open()
+                    openFileDialogTimer.targetDialog = importExcelDialog
+                    openFileDialogTimer.start()
                 }
             }
         }
 
-        // -------- 状态栏 --------
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 30
