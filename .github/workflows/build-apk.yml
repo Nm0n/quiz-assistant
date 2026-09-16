@@ -6,7 +6,7 @@
 #   - 修改 buildozer/default.spec 加入 p4a.source_dir
 #   - 后台监控脚本：在 pyside6-android-deploy 运行时持续监视 p4a，发现 3.14 立即改为 3.11.5
 #   - NDK/SDK 路径通过命令行传入
-#   - 【修复】NDK 降级到 r26b，并修补 PythonActivity.java 确保先加载 Qt6Core
+#   - 【修复】NDK 降级到 r26b，并在 PythonActivity 中插入静态块提前加载 Qt6Core
 
 name: Build Android APK
 
@@ -23,7 +23,7 @@ env:
   PYTHON_VERSION: '3.11'
   PYSIDE_VERSION: '6.9.2'
   ANDROID_SDK_VERSION: '33'
-  ANDROID_NDK_VERSION: '26.1.10909125'   # 修复：降级到 r26b
+  ANDROID_NDK_VERSION: '26.1.10909125'
   ANDROID_BUILD_TOOLS: '33.0.2'
   ANDROID_HOME: /usr/local/lib/android/sdk
   TARGET_PYTHON: '3.11.5'
@@ -44,9 +44,6 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      # ============================================================
-      # 创建 venv 并持久化到后续步骤
-      # ============================================================
       - name: Create and activate venv
         run: |
           python -m venv $HOME/venv
@@ -57,9 +54,6 @@ jobs:
           which python
           pip --version
 
-      # ============================================================
-      # JDK 17
-      # ============================================================
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -71,9 +65,6 @@ jobs:
           echo "JAVA_HOME=$JAVA_HOME"
           java -version
 
-      # ============================================================
-      # 手动装 cmdline-tools
-      # ============================================================
       - name: Manually install Android cmdline-tools
         run: |
           sudo mkdir -p "$ANDROID_HOME"
@@ -136,9 +127,6 @@ jobs:
             "build-tools;${ANDROID_BUILD_TOOLS}" || true
           yes | sdkmanager --licenses || true
 
-      # ============================================================
-      # 安装 NDK r26b
-      # ============================================================
       - name: Install Android NDK r26b
         run: |
           yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
@@ -156,9 +144,6 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
 
-      # ============================================================
-      # 系统依赖
-      # ============================================================
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -169,9 +154,6 @@ jobs:
             python3 python3-dev python3-pip python3-venv \
             unzip wget zip
 
-      # ============================================================
-      # 在 venv 里安装 PySide6 6.9.2 和工具
-      # ============================================================
       - name: Install PySide6 and deploy tools in venv
         run: |
           source $HOME/venv/bin/activate
@@ -185,9 +167,6 @@ jobs:
           pip list | grep -i -E "pyside|shiboken|buildozer"
           which pyside6-android-deploy
 
-      # ============================================================
-      # 下载 6.9.2 的 Android wheel
-      # ============================================================
       - name: Download Android Wheels
         run: |
           mkdir -p wheels
@@ -207,9 +186,6 @@ jobs:
           test -d qml                || (echo "缺少 qml/" && exit 1)
           test -f qml/main.qml       || (echo "缺少 qml/main.qml" && exit 1)
 
-      # ============================================================
-      # 【核心 1/6】下载 Python 3.11.5 源码包并计算校验和
-      # ============================================================
       - name: Download Python ${{ env.TARGET_PYTHON }} and compute checksums
         run: |
           cd /tmp
@@ -227,9 +203,6 @@ jobs:
           echo "MD5    = $MD5"
           echo "SHA256 = $SHA256"
 
-      # ============================================================
-      # 【核心 2/6】预克隆 p4a 到两个位置并打补丁（含 JNI 修复）
-      # ============================================================
       - name: Pre-clone p4a to both locations and patch
         run: |
           set -e
@@ -253,8 +226,7 @@ jobs:
             echo "============================================================"
             cd "$P4A_DIR"
 
-            # ---------- 1. 修改 Python 版本为 3.11.5 ----------
-            echo "======== 修改前：grep 3.14 出现位置 ========"
+            echo "======== 修改 Python 版本：grep 3.14 出现位置 ========"
             for RECIPE_NAME in python3 hostpython3; do
               RECIPE_FILE="pythonforandroid/recipes/$RECIPE_NAME/__init__.py"
               echo "---- $RECIPE_FILE ----"
@@ -263,7 +235,6 @@ jobs:
 
             for RECIPE_NAME in python3 hostpython3; do
               RECIPE_FILE="pythonforandroid/recipes/$RECIPE_NAME/__init__.py"
-              echo ""
               echo "======== 修改 $RECIPE_NAME ========"
 
               sed -i -E "s/^([[:space:]]*version[[:space:]]*=[[:space:]]*)['\"]3\.[0-9]+\.[0-9]+['\"]/\1'${TARGET_PYTHON}'/" "$RECIPE_FILE"
@@ -275,26 +246,30 @@ jobs:
               grep -nE "version|md5sum|sha256|url" "$RECIPE_FILE" | head -20
             done
 
-            # ---------- 2. 修复 JNI 初始化顺序：在 PythonActivity.java 的 onCreate 中先加载 Qt6Core ----------
             echo ""
-            echo "======== 修复 JNI 初始化顺序 ========"
-            JAVA_FILE="$P4A_DIR/pythonforandroid/bootstraps/qt/build/src/org/kivy/android/PythonActivity.java"
-            if [ -f "$JAVA_FILE" ]; then
-              echo "找到 Java 文件: $JAVA_FILE"
-              # 检查是否已经插入过，避免重复
-              if ! grep -q 'System.loadLibrary("Qt6Core")' "$JAVA_FILE"; then
-                # 在 onCreate 方法的第一行插入 System.loadLibrary("Qt6Core");
-                # 匹配 protected void onCreate(Bundle savedInstanceState) {
-                sed -i '/protected void onCreate(Bundle savedInstanceState)/a\        System.loadLibrary("Qt6Core");' "$JAVA_FILE"
-                echo "已插入 System.loadLibrary(\"Qt6Core\");"
-              else
-                echo "已存在 Qt6Core 加载，跳过。"
-              fi
-              echo "---- 修改后的 onCreate 片段 ----"
-              grep -A 5 "protected void onCreate" "$JAVA_FILE" || true
+            echo "======== 修复 JNI 初始化顺序：在 PythonActivity 中提前加载 Qt6Core ========"
+            JAVA_FILE=$(find "$P4A_DIR" -name "PythonActivity.java" -type f 2>/dev/null | head -1)
+            if [ -z "$JAVA_FILE" ]; then
+              echo "警告：未找到 PythonActivity.java，跳过 JNI 补丁。"
             else
-              echo "警告：未找到 $JAVA_FILE，尝试全局搜索..."
-              find "$P4A_DIR" -name "PythonActivity.java" -print
+              echo "找到 Java 文件: $JAVA_FILE"
+              if grep -q "loadQt6CoreFirst" "$JAVA_FILE"; then
+                echo "已存在 JNI 补丁，跳过。"
+              else
+                sed -i '/^public class PythonActivity/a\
+              /* loadQt6CoreFirst */\
+              static {\
+                  try {\
+                      String abi = android.os.Build.SUPPORTED_ABIS[0];\
+                      System.loadLibrary("Qt6Core_" + abi);\
+                  } catch (Throwable t) {\
+                      t.printStackTrace();\
+                  }\
+              }' "$JAVA_FILE"
+                echo "已插入静态初始化器。"
+              fi
+              echo "---- 修改后的区域 ----"
+              grep -A 12 "loadQt6CoreFirst" "$JAVA_FILE" || true
             fi
 
             echo ""
@@ -308,9 +283,6 @@ jobs:
           echo "位置 A p4a: $(test -d "$P4A_DIR_A" && echo 存在 || echo 不存在)"
           echo "位置 B p4a: $(test -d "$P4A_DIR_B" && echo 存在 || echo 不存在)"
 
-      # ============================================================
-      # 【核心 3/6】修改 buildozer/default.spec，加入 p4a.source_dir
-      # ============================================================
       - name: Patch buildozer default.spec to use our p4a
         run: |
           source $HOME/venv/bin/activate
@@ -336,9 +308,6 @@ jobs:
           echo "======== 修改后：default.spec 中 buildozer section ========"
           grep -A 20 "^\[buildozer\]" "$DEFAULT_SPEC" || true
 
-      # ============================================================
-      # 【核心 4/6】清理 p4a 构建缓存
-      # ============================================================
       - name: Clean p4a build cache
         run: |
           PLATFORM_DIR="$GITHUB_WORKSPACE/.buildozer/android/platform"
@@ -357,9 +326,6 @@ jobs:
           echo "======== 确认 p4a recipe 状态 ========"
           grep -nE "^[[:space:]]*version[[:space:]]*=" "$PLATFORM_DIR/python-for-android/pythonforandroid/recipes/python3/__init__.py" || true
 
-      # ============================================================
-      # 【核心 5/6】启动后台监控脚本
-      # ============================================================
       - name: Start background p4a patcher
         run: |
           PATCHER_SCRIPT="$GITHUB_WORKSPACE/p4a_patcher.sh"
@@ -404,9 +370,6 @@ jobs:
           echo "======== Patcher 启动日志 ========"
           cat /tmp/patcher.log || true
 
-      # ============================================================
-      # 【核心 6/6】运行 pyside6-android-deploy
-      # ============================================================
       - name: Run pyside6-android-deploy
         run: |
           set -o pipefail
@@ -453,9 +416,6 @@ jobs:
           echo "pyside6-android-deploy 退出码: $EXIT_CODE"
           exit $EXIT_CODE
 
-      # ============================================================
-      # 运行后诊断
-      # ============================================================
       - name: Post-deploy diagnostics
         if: always()
         run: |
@@ -487,9 +447,6 @@ jobs:
             tail -50 "$GITHUB_WORKSPACE/build.log" || true
           fi
 
-      # ============================================================
-      # 停止后台 patcher
-      # ============================================================
       - name: Stop background p4a patcher
         if: always()
         run: |
@@ -501,9 +458,6 @@ jobs:
           echo "======== 最终 Patcher 日志 ========"
           cat /tmp/patcher.log || echo "无 patcher 日志"
 
-      # ============================================================
-      # 收集 APK
-      # ============================================================
       - name: Collect APK artifacts
         if: always()
         run: |
@@ -526,9 +480,6 @@ jobs:
           echo "=== 查找所有 AAB 文件 ==="
           find . -type f -name "*.aab" 2>/dev/null || echo "未找到任何 AAB 文件"
 
-      # ============================================================
-      # 校验 APK 内容
-      # ============================================================
       - name: Verify APK contains libpython3.11.so
         if: always()
         run: |
