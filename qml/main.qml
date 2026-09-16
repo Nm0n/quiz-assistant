@@ -1,6 +1,11 @@
 // qml/main.qml
 // 主窗口：布局、顶部状态区、进度条、题目区域、底部按钮区、抽屉菜单。
 // 所有业务调用统一走 bridge（在 main.py 中注册的 ControllerBridge）。
+//
+// 文件选择器策略：
+//   - Android：由 bridge.openFilePicker() 走原生 Intent
+//   - 桌面端：bridge.openFilePicker() 会发出 qmlFileDialogRequested 信号，
+//            由此处打开 QML FileDialog
 
 import QtQuick
 import QtQuick.Controls
@@ -16,7 +21,7 @@ ApplicationWindow {
     color: "#f0f2f5"
 
     // ============================================================
-    // 视图状态（全部来自 bridge）
+    // 视图状态
     // ============================================================
     readonly property var viewState: bridge.viewState
 
@@ -37,6 +42,7 @@ ApplicationWindow {
     readonly property bool shuffleEnabled:
         viewState ? viewState.shuffleEnabled : false
 
+    // Excel 导入开关：Android 端 pandas/openpyxl 不可用，默认禁用。
     readonly property bool excelImportEnabled: false
 
     title: "智能刷题助手 - " + fileLabel + modifiedMark
@@ -117,7 +123,7 @@ ApplicationWindow {
     }
 
     // ============================================================
-    // 文件对话框
+    // 文件对话框（仅桌面端使用）
     // ============================================================
     FileDialog {
         id: openJsonDialog
@@ -127,15 +133,10 @@ ApplicationWindow {
         onAccepted: {
             var path = selectedFile.toString()
             console.log("[FileDialog] openJson accepted: " + path)
-            // 注意：onAccepted 触发时，对话框已经在关闭过程中，
-            // 不要再手动调用 close() 或 selectedFile = null，否则 Android 上可能异常。
             bridge.loadFromJson(path)
         }
         onRejected: {
             console.log("[FileDialog] openJson rejected")
-        }
-        onVisibleChanged: {
-            console.log("[FileDialog] openJson visible = " + visible)
         }
     }
 
@@ -153,9 +154,6 @@ ApplicationWindow {
         }
         onRejected: {
             console.log("[FileDialog] saveJson rejected")
-        }
-        onVisibleChanged: {
-            console.log("[FileDialog] saveJson visible = " + visible)
         }
     }
 
@@ -175,25 +173,18 @@ ApplicationWindow {
     }
 
     // ============================================================
-    // 延迟打开 FileDialog 的中介 Timer
-    //   把间隔从 350ms 增加到 700ms，避免 Drawer 动画期间
-    //   Android 系统忽略 startActivityForResult。
-    //   使用 visible = true 而不是 open()，兼容性更好。
+    // 延迟打开 FileDialog 的中介 Timer（仅桌面端）
     // ============================================================
     Timer {
         id: openFileDialogTimer
         property var targetDialog: null
 
-        interval: 700
+        interval: 350
         repeat: false
 
         onTriggered: {
-            if (!targetDialog) return
-            try {
-                targetDialog.visible = true
-                console.log("[Timer] opened dialog: " + targetDialog)
-            } catch (e) {
-                console.log("[Timer] open dialog failed: " + e)
+            if (targetDialog) {
+                targetDialog.open()
             }
         }
     }
@@ -240,8 +231,7 @@ ApplicationWindow {
         }
         var ok = bridge.saveCurrent()
         if (!ok) {
-            openFileDialogTimer.targetDialog = saveJsonDialog
-            openFileDialogTimer.start()
+            saveJsonDialog.open()
         }
     }
 
@@ -252,6 +242,11 @@ ApplicationWindow {
         target: bridge
         function onInfoMessage(msg) { appWindow.showToast(msg) }
         function onErrorOccurred(msg) { appWindow.showMessage("提示", msg) }
+        function onQmlFileDialogRequested() {
+            // 桌面端：bridge.openFilePicker() 会触发此信号
+            openFileDialogTimer.targetDialog = openJsonDialog
+            openFileDialogTimer.start()
+        }
     }
 
     // ============================================================
@@ -314,8 +309,8 @@ ApplicationWindow {
                 label: "打开题库"
                 onClicked: {
                     menuDrawer.close()
-                    openFileDialogTimer.targetDialog = openJsonDialog
-                    openFileDialogTimer.start()
+                    // 统一入口：Android 走原生 Intent，桌面走 QML FileDialog
+                    bridge.openFilePicker()
                 }
             }
             MenuEntry {
