@@ -6,6 +6,7 @@
 #   - 修改 buildozer/default.spec 加入 p4a.source_dir
 #   - 后台监控脚本：在 pyside6-android-deploy 运行时持续监视 p4a，发现 3.14 立即改为 3.11.5
 #   - NDK/SDK 路径通过命令行传入
+#   - 【修复】NDK 降级到 r26b，并修补 PythonActivity.java 确保先加载 Qt6Core
 
 name: Build Android APK
 
@@ -22,7 +23,7 @@ env:
   PYTHON_VERSION: '3.11'
   PYSIDE_VERSION: '6.9.2'
   ANDROID_SDK_VERSION: '33'
-  ANDROID_NDK_VERSION: '27.2.12479018'
+  ANDROID_NDK_VERSION: '26.1.10909125'   # 修复：降级到 r26b
   ANDROID_BUILD_TOOLS: '33.0.2'
   ANDROID_HOME: /usr/local/lib/android/sdk
   TARGET_PYTHON: '3.11.5'
@@ -136,13 +137,13 @@ jobs:
           yes | sdkmanager --licenses || true
 
       # ============================================================
-      # 安装 NDK r27c
+      # 安装 NDK r26b
       # ============================================================
-      - name: Install Android NDK r27c
+      - name: Install Android NDK r26b
         run: |
           yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
           test -d "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" || (echo "NDK 安装失败" && exit 1)
-          echo "NDK r27c 已安装"
+          echo "NDK r26b 已安装"
           echo "=== NDK 目录内容 ==="
           ls "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}/" | head -20
 
@@ -227,7 +228,7 @@ jobs:
           echo "SHA256 = $SHA256"
 
       # ============================================================
-      # 【核心 2/6】预克隆 p4a 到两个位置并打补丁
+      # 【核心 2/6】预克隆 p4a 到两个位置并打补丁（含 JNI 修复）
       # ============================================================
       - name: Pre-clone p4a to both locations and patch
         run: |
@@ -252,6 +253,7 @@ jobs:
             echo "============================================================"
             cd "$P4A_DIR"
 
+            # ---------- 1. 修改 Python 版本为 3.11.5 ----------
             echo "======== 修改前：grep 3.14 出现位置 ========"
             for RECIPE_NAME in python3 hostpython3; do
               RECIPE_FILE="pythonforandroid/recipes/$RECIPE_NAME/__init__.py"
@@ -272,6 +274,28 @@ jobs:
               echo "---- 修改后 ----"
               grep -nE "version|md5sum|sha256|url" "$RECIPE_FILE" | head -20
             done
+
+            # ---------- 2. 修复 JNI 初始化顺序：在 PythonActivity.java 的 onCreate 中先加载 Qt6Core ----------
+            echo ""
+            echo "======== 修复 JNI 初始化顺序 ========"
+            JAVA_FILE="$P4A_DIR/pythonforandroid/bootstraps/qt/build/src/org/kivy/android/PythonActivity.java"
+            if [ -f "$JAVA_FILE" ]; then
+              echo "找到 Java 文件: $JAVA_FILE"
+              # 检查是否已经插入过，避免重复
+              if ! grep -q 'System.loadLibrary("Qt6Core")' "$JAVA_FILE"; then
+                # 在 onCreate 方法的第一行插入 System.loadLibrary("Qt6Core");
+                # 匹配 protected void onCreate(Bundle savedInstanceState) {
+                sed -i '/protected void onCreate(Bundle savedInstanceState)/a\        System.loadLibrary("Qt6Core");' "$JAVA_FILE"
+                echo "已插入 System.loadLibrary(\"Qt6Core\");"
+              else
+                echo "已存在 Qt6Core 加载，跳过。"
+              fi
+              echo "---- 修改后的 onCreate 片段 ----"
+              grep -A 5 "protected void onCreate" "$JAVA_FILE" || true
+            else
+              echo "警告：未找到 $JAVA_FILE，尝试全局搜索..."
+              find "$P4A_DIR" -name "PythonActivity.java" -print
+            fi
 
             echo ""
             echo "======== 最终检查 ========"
@@ -335,9 +359,6 @@ jobs:
 
       # ============================================================
       # 【核心 5/6】启动后台监控脚本
-      #   它会在整个 workflow 运行期间持续监视 p4a 目录，
-      #   一旦 buildozer 重新 clone 出现 3.14 recipe，立即修改。
-      #   脚本在最后一步被 kill，或者在构建结束前一直运行。
       # ============================================================
       - name: Start background p4a patcher
         run: |
@@ -345,12 +366,10 @@ jobs:
 
           cat > "$PATCHER_SCRIPT" <<'PATCHER_EOF'
           #!/bin/bash
-          # 持续监视 p4a 目录，一旦发现 3.14 recipe 立即修改
           LOG="/tmp/patcher.log"
           echo "[Patcher] 启动于 $(date)" > "$LOG"
 
           while true; do
-            # 查找所有 p4a 目录（不限于 workspace）
             for P4A_DIR in \
               "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" \
               "$GITHUB_WORKSPACE/python-for-android" \
@@ -377,12 +396,10 @@ jobs:
 
           chmod +x "$PATCHER_SCRIPT"
 
-          # 后台运行 patcher
           nohup "$PATCHER_SCRIPT" > /dev/null 2>&1 &
           echo "$!" > /tmp/patcher.pid
           echo "Patcher PID: $(cat /tmp/patcher.pid)"
 
-          # 等待 3 秒确认 patcher 已启动
           sleep 3
           echo "======== Patcher 启动日志 ========"
           cat /tmp/patcher.log || true
