@@ -12,8 +12,7 @@ android_packages =
 [qt]
 qml_files = qml/main.qml, qml/OptionItem.qml, qml/QuestionPanel.qml
 excluded_qml_plugins = 
-plugins = 
-libs = 
+
 
 [android]
 plugins = 
