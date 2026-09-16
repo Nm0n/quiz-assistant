@@ -1,3 +1,14 @@
+# main.py
+# 移动端 / 跨平台入口：加载 QML，注册桥接对象，启动应用。
+#
+# core/ 前提：IO 方法接受 str 路径或 file-like 对象。
+# 桥接层把 QML 传来的字符串统一转成 core 能消费的「路径或流」。
+#
+# Android 适配要点：
+#   - content:// URI 无法用 QFile 读取，必须走 ContentResolver
+#   - QML 在 assets/私有目录下的路径不固定，需要多候选尝试
+#   - 必须启动 Qt 事件循环（app.exec()），否则主线程退出会导致崩溃
+
 import io
 import os
 import sys
@@ -56,7 +67,21 @@ class ControllerBridge(QObject):
         if "://" not in raw:
             return (raw, raw) if os.path.exists(raw) else (None, None)
 
-        # content:// 等远程 URI → 读入内存
+        # ========== Android content:// URI ==========
+        # Qt 的 QFile 无法处理 content://，必须用 Android ContentResolver
+        if raw.startswith("content://"):
+            if sys.platform != "android":
+                return None, None
+            try:
+                data = ControllerBridge._read_android_uri(raw)
+                if data is None:
+                    return None, None
+                return io.BytesIO(data), raw
+            except Exception as e:
+                print("[content://] read failed: {}".format(e))
+                return None, None
+
+        # 其它远程 URI（如 http://）→ 用 QFile 尝试（桌面端可能有效）
         qf = QFile(QUrl(raw))
         if not qf.open(QIODevice.ReadOnly):
             return None, None
@@ -70,7 +95,7 @@ class ControllerBridge(QObject):
     def _resolve_write(raw):
         """
         QML 传来的字符串 → 产出 (target, resolved)。
-        target 为 None 表示无法写入。QFile 在 with 退出时自动关闭。
+        target 为 None 表示无法写入。
         """
         if not raw:
             yield None, None
@@ -86,6 +111,27 @@ class ControllerBridge(QObject):
             yield raw, raw
             return
 
+        # ========== Android content:// URI（另存为场景）==========
+        if raw.startswith("content://"):
+            if sys.platform != "android":
+                yield None, None
+                return
+            writer = None
+            try:
+                writer = ControllerBridge._open_android_uri_for_write(raw)
+                yield writer, raw
+            except Exception as e:
+                print("[content://] open for write failed: {}".format(e))
+                yield None, None
+            finally:
+                if writer is not None:
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+            return
+
+        # 其它远程 URI → 用 QFile
         qf = QFile(QUrl(raw))
         if not qf.open(QIODevice.WriteOnly | QIODevice.Truncate):
             yield None, None
@@ -94,6 +140,71 @@ class ControllerBridge(QObject):
             yield qf, raw
         finally:
             qf.close()
+
+    # ==============================================================
+    # Android ContentResolver 辅助
+    # ==============================================================
+    @staticmethod
+    def _read_android_uri(uri_str):
+        """
+        用 Android 的 ContentResolver.openInputStream() 读取 content:// URI 的全部字节。
+        读取失败返回 None。
+        """
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
+        Uri = autoclass("android.net.Uri")
+        ByteArrayOutputStream = autoclass("java.io.ByteArrayOutputStream")
+
+        uri = Uri.parse(uri_str)
+        resolver = activity.getContentResolver()
+        stream = resolver.openInputStream(uri)
+        if stream is None:
+            return None
+        try:
+            baos = ByteArrayOutputStream()
+            buf = bytearray(8192)
+            while True:
+                n = stream.read(buf)
+                if n <= 0:
+                    break
+                baos.write(buf, 0, n)
+            return bytes(baos.toByteArray())
+        finally:
+            stream.close()
+
+    @staticmethod
+    def _open_android_uri_for_write(uri_str):
+        """
+        用 Android 的 ContentResolver.openOutputStream() 打开 content:// URI 用于写入。
+        返回一个模拟 file-like 的对象，支持 write(bytes) 和 close()。
+        """
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
+        Uri = autoclass("android.net.Uri")
+
+        uri = Uri.parse(uri_str)
+        resolver = activity.getContentResolver()
+        stream = resolver.openOutputStream(uri)
+        if stream is None:
+            raise IOError("openOutputStream returned null")
+
+        class _AndroidOutputStream:
+            def __init__(self, java_stream):
+                self._stream = java_stream
+
+            def write(self, data):
+                if isinstance(data, str):
+                    data = data.encode("utf-8")
+                self._stream.write(data)
+
+            def close(self):
+                if self._stream is not None:
+                    self._stream.close()
+                    self._stream = None
+
+        return _AndroidOutputStream(stream)
 
     @staticmethod
     def _basename(path_or_uri):
@@ -190,6 +301,11 @@ class ControllerBridge(QObject):
 
     @Slot(str, result=int)
     def loadFromExcel(self, raw):
+        # Android 端 pandas/openpyxl 未打包，直接拒绝，避免误触黑屏
+        if sys.platform == "android":
+            self.errorOccurred.emit("Android 端不支持 Excel 导入，请使用 JSON 格式的题库。")
+            return 0
+
         source, _ = self._resolve_read(raw)
         if source is None:
             self.errorOccurred.emit("无法读取所选文件")
