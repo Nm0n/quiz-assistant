@@ -1,11 +1,9 @@
 // qml/main.qml
 // 主窗口：布局、顶部状态区、进度条、题目区域、底部按钮区、抽屉菜单。
-// 所有业务调用统一走 bridge（在 main.py 中注册的 ControllerBridge）。
 //
-// 文件选择器策略：
-//   - Android：由 bridge.openFilePicker() 走原生 Intent
-//   - 桌面端：bridge.openFilePicker() 会发出 qmlFileDialogRequested 信号，
-//            由此处打开 QML FileDialog
+// 文件加载策略：
+//   - Android：打开应用内 filePickerDialog（扫描专属目录，无 Activity 切换）
+//   - 桌面：打开 QML FileDialog（原有逻辑）
 
 import QtQuick
 import QtQuick.Controls
@@ -42,7 +40,6 @@ ApplicationWindow {
     readonly property bool shuffleEnabled:
         viewState ? viewState.shuffleEnabled : false
 
-    // Excel 导入开关：Android 端 pandas/openpyxl 不可用，默认禁用。
     readonly property bool excelImportEnabled: false
 
     title: "智能刷题助手 - " + fileLabel + modifiedMark
@@ -50,7 +47,6 @@ ApplicationWindow {
     // ============================================================
     // 内联组件
     // ============================================================
-
     component FlatButton: Button {
         id: control
         implicitHeight: 42
@@ -123,7 +119,204 @@ ApplicationWindow {
     }
 
     // ============================================================
-    // 文件对话框（仅桌面端使用）
+    // 应用内文件浏览器（Android 使用）
+    // ============================================================
+    Dialog {
+        id: filePickerDialog
+        title: "选择题库文件"
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(appWindow.width - 32, 420)
+        height: Math.min(appWindow.height - 80, 600)
+        padding: 0
+
+        property var files: []
+        property string watchDir: ""
+
+        function refresh() {
+            watchDir = bridge.getWatchDir()
+            files = bridge.listJsonFiles()
+        }
+
+        onAboutToShow: refresh()
+
+        contentItem: Rectangle {
+            implicitWidth: 380
+            implicitHeight: 520
+            color: "#ffffff"
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 0
+
+                // ---- 顶部：目录提示 ----
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 96
+                    color: "#f5f7fa"
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        spacing: 6
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: "📁 文件目录"
+                                font.pixelSize: 13
+                                font.bold: true
+                                color: "#303133"
+                            }
+
+                            Button {
+                                text: "刷新"
+                                implicitHeight: 28
+                                implicitWidth: 60
+                                font.pixelSize: 12
+                                onClicked: filePickerDialog.refresh()
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: filePickerDialog.watchDir
+                            wrapMode: Text.WrapAnywhere
+                            font.pixelSize: 11
+                            color: "#606266"
+                            maximumLineCount: 2
+                            elide: Text.ElideRight
+                        }
+
+                        Button {
+                            text: "📋 复制路径"
+                            implicitHeight: 26
+                            implicitWidth: 100
+                            font.pixelSize: 11
+                            onClicked: bridge.copyToClipboard(filePickerDialog.watchDir)
+                        }
+                    }
+                }
+
+                // ---- 中间：文件列表 或 空提示 ----
+                Item {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+
+                    // 空目录提示
+                    Column {
+                        anchors.centerIn: parent
+                        width: parent.width - 48
+                        spacing: 10
+                        visible: filePickerDialog.files.length === 0
+
+                        Text {
+                            width: parent.width
+                            text: "📂"
+                            font.pixelSize: 52
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+                        Text {
+                            width: parent.width
+                            text: "目录中没有 JSON 文件"
+                            font.pixelSize: 15
+                            font.bold: true
+                            color: "#303133"
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+                        Text {
+                            width: parent.width
+                            text: "请用 USB 连接电脑，或使用系统「文件」应用，把 .json 文件复制到上面的目录，然后点击「刷新」。"
+                            wrapMode: Text.WordWrap
+                            font.pixelSize: 12
+                            color: "#909399"
+                            horizontalAlignment: Text.AlignHCenter
+                            lineHeight: 1.4
+                        }
+                    }
+
+                    // 文件列表
+                    ListView {
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        clip: true
+                        spacing: 2
+                        visible: filePickerDialog.files.length > 0
+                        model: filePickerDialog.files
+
+                        delegate: Rectangle {
+                            width: ListView.view.width
+                            height: 60
+                            radius: 6
+                            color: fileArea.pressed ? "#ecf5ff" : "transparent"
+                            border.width: 1
+                            border.color: fileArea.pressed ? "#409eff" : "#f0f2f5"
+
+                            Column {
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.left: parent.left
+                                anchors.leftMargin: 14
+                                anchors.right: parent.right
+                                anchors.rightMargin: 14
+                                spacing: 3
+
+                                Text {
+                                    width: parent.width
+                                    text: modelData.name
+                                    font.pixelSize: 14
+                                    color: "#303133"
+                                    elide: Text.ElideRight
+                                }
+                                Text {
+                                    text: (modelData.size / 1024).toFixed(1) + " KB"
+                                    font.pixelSize: 11
+                                    color: "#909399"
+                                }
+                            }
+
+                            MouseArea {
+                                id: fileArea
+                                anchors.fill: parent
+                                onClicked: {
+                                    filePickerDialog.close()
+                                    bridge.loadJsonFile(modelData.path)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ---- 底部：关闭 ----
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 56
+                    color: "#ffffff"
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        spacing: 8
+
+                        Item { Layout.fillWidth: true }
+
+                        Button {
+                            text: "关闭"
+                            implicitHeight: 36
+                            implicitWidth: 88
+                            font.pixelSize: 13
+                            onClicked: filePickerDialog.close()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ============================================================
+    // 桌面端文件对话框
     // ============================================================
     FileDialog {
         id: openJsonDialog
@@ -173,19 +366,22 @@ ApplicationWindow {
     }
 
     // ============================================================
-    // 延迟打开 FileDialog 的中介 Timer（仅桌面端）
+    // 延迟打开对话框的 Timer（避开 Drawer 关闭动画）
     // ============================================================
+    Timer {
+        id: filePickerTimer
+        interval: 300
+        repeat: false
+        onTriggered: filePickerDialog.open()
+    }
+
     Timer {
         id: openFileDialogTimer
         property var targetDialog: null
-
         interval: 350
         repeat: false
-
         onTriggered: {
-            if (targetDialog) {
-                targetDialog.open()
-            }
+            if (targetDialog) targetDialog.open()
         }
     }
 
@@ -243,7 +439,6 @@ ApplicationWindow {
         function onInfoMessage(msg) { appWindow.showToast(msg) }
         function onErrorOccurred(msg) { appWindow.showMessage("提示", msg) }
         function onQmlFileDialogRequested() {
-            // 桌面端：bridge.openFilePicker() 会触发此信号
             openFileDialogTimer.targetDialog = openJsonDialog
             openFileDialogTimer.start()
         }
@@ -309,8 +504,14 @@ ApplicationWindow {
                 label: "打开题库"
                 onClicked: {
                     menuDrawer.close()
-                    // 统一入口：Android 走原生 Intent，桌面走 QML FileDialog
-                    bridge.openFilePicker()
+                    if (bridge.isAndroid) {
+                        // Android：打开应用内文件浏览器（无 Activity 切换）
+                        filePickerTimer.start()
+                    } else {
+                        // 桌面：使用系统 FileDialog
+                        openFileDialogTimer.targetDialog = openJsonDialog
+                        openFileDialogTimer.start()
+                    }
                 }
             }
             MenuEntry {
@@ -609,7 +810,7 @@ ApplicationWindow {
     }
 
     // ============================================================
-    // Toast（轻提示）
+    // Toast
     // ============================================================
     Rectangle {
         id: toast
