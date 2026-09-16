@@ -6,7 +6,7 @@
 #
 # Android 适配要点：
 #   - content:// URI 无法用 QFile 读取，必须走 ContentResolver
-#   - QML 在 assets/私有目录下的路径不固定，需要多候选尝试
+#   - 使用原生 Intent 打开文件选择器，避免 QML FileDialog 的 JNI 竞态
 #   - 必须启动 Qt 事件循环（app.exec()），否则主线程退出会导致崩溃
 
 import io
@@ -14,7 +14,7 @@ import os
 import sys
 from contextlib import contextmanager
 
-from PySide6.QtCore import QObject, Property, QUrl, Signal, Slot, QFile, QIODevice
+from PySide6.QtCore import QObject, Property, QUrl, Signal, Slot, QFile, QIODevice, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -35,10 +35,22 @@ class ControllerBridge(QObject):
     viewStateChanged = Signal()
     infoMessage = Signal(str)
     errorOccurred = Signal(str)
+    # 桌面端请求 QML 打开 FileDialog（Android 端不走这个信号）
+    qmlFileDialogRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._controller = SessionController()
+        # 文件选择器回调绑定状态
+        self._file_picker_bound = False
+        self._file_picker_callback = None
+
+    # ==============================================================
+    # 平台判断（供 QML 读取）
+    # ==============================================================
+    @Property(bool, constant=True)
+    def isAndroid(self):
+        return sys.platform == "android"
 
     # ==============================================================
     # 路径 / URI 适配
@@ -68,7 +80,6 @@ class ControllerBridge(QObject):
             return (raw, raw) if os.path.exists(raw) else (None, None)
 
         # ========== Android content:// URI ==========
-        # Qt 的 QFile 无法处理 content://，必须用 Android ContentResolver
         if raw.startswith("content://"):
             if sys.platform != "android":
                 return None, None
@@ -81,7 +92,7 @@ class ControllerBridge(QObject):
                 print("[content://] read failed: {}".format(e))
                 return None, None
 
-        # 其它远程 URI（如 http://）→ 用 QFile 尝试（桌面端可能有效）
+        # 其它远程 URI（如 http://）→ 用 QFile 尝试
         qf = QFile(QUrl(raw))
         if not qf.open(QIODevice.ReadOnly):
             return None, None
@@ -269,7 +280,114 @@ class ControllerBridge(QObject):
         self.viewStateChanged.emit()
 
     # ==============================================================
-    # 文件操作
+    # 文件选择器（Android 原生 Intent / 桌面 QML FileDialog）
+    # ==============================================================
+    @Slot()
+    def openFilePicker(self):
+        """
+        打开文件选择器：
+          - Android：使用原生 Intent.ACTION_GET_CONTENT，通过 onActivityResult 拿到 content:// URI
+          - 桌面：发出 qmlFileDialogRequested 信号，由 QML 打开 FileDialog
+        """
+        if sys.platform != "android":
+            self.qmlFileDialogRequested.emit()
+            return
+
+        try:
+            from jnius import autoclass
+            from android import activity as android_activity
+
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            Intent = autoclass("android.content.Intent")
+
+            intent = Intent(Intent.ACTION_GET_CONTENT)
+            intent.setType("*/*")
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
+            current_activity = PythonActivity.mActivity
+
+            # 确保同一时间只绑定一个回调
+            if self._file_picker_bound and self._file_picker_callback is not None:
+                try:
+                    android_activity.unbind(self._file_picker_callback)
+                except Exception:
+                    pass
+                self._file_picker_bound = False
+                self._file_picker_callback = None
+
+            def on_activity_result(request_code, result_code, data):
+                # 一次性回调：立即解绑
+                try:
+                    android_activity.unbind(on_activity_result)
+                except Exception:
+                    pass
+                self._file_picker_bound = False
+                self._file_picker_callback = None
+
+                if request_code != 1001:
+                    return
+                # RESULT_OK == -1
+                if result_code != -1:
+                    print("[FilePicker] cancelled, result_code={}".format(result_code))
+                    return
+                if data is None:
+                    print("[FilePicker] data is None")
+                    return
+
+                try:
+                    uri = data.getData()
+                    if uri is None:
+                        print("[FilePicker] uri is None")
+                        return
+                    uri_str = uri.toString()
+                    print("[FilePicker] selected URI: " + uri_str)
+                    # 切回 Qt 主线程处理
+                    QTimer.singleShot(0, lambda: self._load_from_android_uri(uri_str))
+                except Exception as e:
+                    print("[FilePicker] handle result failed: {}".format(e))
+                    self.errorOccurred.emit("处理选择结果失败：{}".format(e))
+
+            self._file_picker_callback = on_activity_result
+            self._file_picker_bound = True
+            android_activity.bind(on_activity_result)
+
+            current_activity.startActivityForResult(intent, 1001)
+
+        except Exception as e:
+            print("[FilePicker] start failed: {}".format(e))
+            self.errorOccurred.emit("无法打开文件选择器：{}".format(e))
+
+    def _load_from_android_uri(self, uri_str):
+        """从 Android content:// URI 加载 JSON 文件（在主线程中执行）"""
+        try:
+            raw = self._read_android_uri(uri_str)
+        except Exception as e:
+            self.errorOccurred.emit("无法读取所选文件：{}".format(e))
+            return
+
+        if not raw:
+            self.errorOccurred.emit("所选文件为空")
+            return
+
+        try:
+            source = io.BytesIO(raw)
+            count = self._controller.load_from_json_file(source)
+        except Exception as e:
+            self.errorOccurred.emit("加载失败：{}".format(e))
+            return
+
+        if count > 0:
+            self._controller.current_file_path = uri_str
+            self._controller.is_modified = False
+            self.infoMessage.emit("已打开题库，共 {} 道题".format(count))
+        else:
+            self.errorOccurred.emit("该文件不包含有效题目数据")
+
+        self._refresh()
+
+    # ==============================================================
+    # 文件操作（路径 / URI 通用入口）
     # ==============================================================
     @Slot(str, result=int)
     def loadFromJson(self, raw):
@@ -301,7 +419,7 @@ class ControllerBridge(QObject):
 
     @Slot(str, result=int)
     def loadFromExcel(self, raw):
-        # Android 端 pandas/openpyxl 未打包，直接拒绝，避免误触黑屏
+        # Android 端 pandas/openpyxl 未打包，直接拒绝
         if sys.platform == "android":
             self.errorOccurred.emit("Android 端不支持 Excel 导入，请使用 JSON 格式的题库。")
             return 0
@@ -481,14 +599,13 @@ class ControllerBridge(QObject):
 def _qml_candidates():
     """
     返回 QML 主文件的候选路径列表，按优先级排序。
-    Android 端和桌面端返回的内容不同，因为文件所在位置不同。
     """
     candidates = []
 
-    # 1) Qt 资源系统（qrc）—— 若打包时生成了 qrc 资源，这个优先级最高
+    # 1) Qt 资源系统（qrc）
     candidates.append("qrc:/qml/main.qml")
 
-    # 2) Android assets 协议 —— pyside6-android-deploy 打包后的常见路径
+    # 2) Android assets 协议
     candidates.append("assets:/qml/main.qml")
 
     # 3) 文件系统路径（桌面端主用）
@@ -497,7 +614,7 @@ def _qml_candidates():
     candidates.append(os.path.join(base, "..", "qml", "main.qml"))
     candidates.append(os.path.join(os.getcwd(), "qml", "main.qml"))
 
-    # 4) Android 应用私有目录（p4a 解压后的 app 目录）
+    # 4) Android 应用私有目录
     if sys.platform == "android":
         try:
             from android import mActivity  # type: ignore
@@ -543,8 +660,7 @@ def main():
         print("[QML] No QML file could be loaded", file=sys.stderr)
         sys.exit(-1)
 
-    # ===== 关键修复：启动 Qt 事件循环 =====
-    # 这会让应用持续运行，避免主线程退出导致对象销毁和线程崩溃
+    # 启动 Qt 事件循环
     sys.exit(app.exec())
 
 
