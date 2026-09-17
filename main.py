@@ -1,9 +1,8 @@
 # main.py
 # 移动端 / 跨平台入口：加载 QML，注册桥接对象，启动应用。
 #
-# 平台检测说明：
-#   PySide6 的 Android 打包环境下 sys.platform == "linux"，
-#   所以不能用 sys.platform == "android" 判断。改用 jnius 是否可导入。
+# 平台检测：PySide6 Android 环境下 sys.platform == "linux"，
+#           且 jnius 不一定存在。改用多路检测（Qt API / 环境变量 / 文件系统特征 / jnius）。
 
 import io
 import os
@@ -27,23 +26,46 @@ ANDROID_WATCH_DIR = "/storage/emulated/0/Download/quizassistant"
 
 
 # ==================================================================
-# 平台检测（全局缓存，只算一次）
+# 平台检测（多路探测，带缓存）
 # ==================================================================
 _ANDROID_CACHE = None
 
+def _detect_android():
+    # 1. Qt 官方 API：Android 上 kernelType 返回 "android"
+    try:
+        from PySide6.QtCore import QSysInfo
+        kt = QSysInfo.kernelType().lower()
+        print("[_detect_android] QSysInfo.kernelType = {}".format(kt))
+        if kt == "android":
+            return True
+    except Exception as e:
+        print("[_detect_android] QSysInfo failed: {}".format(e))
+
+    # 2. 环境变量
+    if os.environ.get("ANDROID_ROOT") or os.environ.get("ANDROID_DATA"):
+        print("[_detect_android] env matched")
+        return True
+
+    # 3. 文件系统特征
+    if os.path.exists("/system/build.prop"):
+        print("[_detect_android] /system/build.prop exists")
+        return True
+
+    # 4. jnius
+    try:
+        import jnius  # noqa: F401
+        print("[_detect_android] jnius available")
+        return True
+    except ImportError:
+        pass
+
+    print("[_detect_android] none matched -> assume desktop")
+    return False
+
 def _is_android():
-    """
-    判断当前是否运行在 p4a / PySide6 Android 环境。
-    PySide6 的 Android 打包下 sys.platform 是 "linux"，因此不能靠它判断；
-    改为尝试 import jnius —— p4a 环境一定带 jnius，桌面端一定没有。
-    """
     global _ANDROID_CACHE
     if _ANDROID_CACHE is None:
-        try:
-            import jnius  # noqa: F401
-            _ANDROID_CACHE = True
-        except ImportError:
-            _ANDROID_CACHE = False
+        _ANDROID_CACHE = _detect_android()
     return _ANDROID_CACHE
 
 
@@ -54,7 +76,6 @@ class ControllerBridge(QObject):
     infoMessage = Signal(str)
     errorOccurred = Signal(str)
     qmlFileDialogRequested = Signal()
-    # 请求 QML 显示"需要存储权限"引导对话框
     storagePermissionRequired = Signal()
 
     def __init__(self, parent=None):
@@ -75,19 +96,38 @@ class ControllerBridge(QObject):
     def hasStoragePermission(self):
         if not _is_android():
             return True
+
+        # 方式一：通过 jnius 查询系统权限状态
         try:
             from jnius import autoclass
             Environment = autoclass("android.os.Environment")
             result = bool(Environment.isExternalStorageManager())
-            print("[hasStoragePermission] isExternalStorageManager = {}".format(result))
-            return result
+            print("[hasStoragePermission] jnius: isExternalStorageManager = {}".format(result))
+            if result:
+                return True
+            # jnius 明确说没权限，再走下面的后备写测试
+        except ImportError:
+            print("[hasStoragePermission] jnius not available, fallback to write test")
         except Exception as e:
-            print("[hasStoragePermission] failed: {}".format(e))
+            print("[hasStoragePermission] jnius failed: {}".format(e))
+
+        # 方式二（后备）：直接对目标目录做一次写测试
+        try:
+            target = ANDROID_WATCH_DIR
+            if not os.path.exists(target):
+                os.makedirs(target, exist_ok=True)
+            test_file = os.path.join(target, ".permission_test")
+            with open(test_file, "w", encoding="utf-8") as f:
+                f.write("ok")
+            os.remove(test_file)
+            print("[hasStoragePermission] write test passed: {}".format(target))
+            return True
+        except Exception as e:
+            print("[hasStoragePermission] write test failed: {}".format(e))
             return False
 
     @Slot()
     def openStoragePermissionSettings(self):
-        """跳转到本应用的「所有文件访问」权限设置页"""
         if not _is_android():
             return
         try:
@@ -113,7 +153,6 @@ class ControllerBridge(QObject):
 
     @Slot(result=bool)
     def ensureWatchDir(self):
-        """确保扫描目录存在，返回是否成功"""
         try:
             target = self._get_watch_dir()
             if not os.path.exists(target):
@@ -130,10 +169,6 @@ class ControllerBridge(QObject):
     # ==============================================================
     @staticmethod
     def _get_watch_dir():
-        """
-        Android: /storage/emulated/0/Download/quizassistant/
-        桌面:   <项目根>/data/
-        """
         if _is_android():
             return ANDROID_WATCH_DIR
         else:
@@ -151,7 +186,6 @@ class ControllerBridge(QObject):
 
     @Slot(result="QVariantList")
     def listJsonFiles(self):
-        """扫描目录，返回 JSON 文件列表 [{name, path, size, mtime}, ...]"""
         watch_dir = self._get_watch_dir()
         result = []
         try:
@@ -627,11 +661,15 @@ def main():
     app.setApplicationName("智能刷题助手")
     app.setOrganizationName("QuizAssistant")
 
-    # 启动时打印平台检测结果，方便日志排查
+    print("=========== [main] 平台检测 ===========")
     print("[main] _is_android() = {}".format(_is_android()))
     print("[main] sys.platform = {}".format(sys.platform))
+    print("[main] ANDROID_ROOT = {}".format(os.environ.get("ANDROID_ROOT")))
+    print("[main] ANDROID_DATA = {}".format(os.environ.get("ANDROID_DATA")))
+    print("[main] /system/build.prop exists = {}".format(os.path.exists("/system/build.prop")))
     if _is_android():
         print("[main] watch_dir = {}".format(ANDROID_WATCH_DIR))
+    print("=======================================")
 
     engine = QQmlApplicationEngine()
     bridge = ControllerBridge()
