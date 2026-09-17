@@ -145,8 +145,8 @@ jobs:
       # ============================================================
       # 预克隆 p4a + 初始补丁
       #   补丁 1：recipe 版本 → 3.11.5
-      #   补丁 2：PythonActivity.java → 静态块加载 Qt6Core + onCreate 里设置 QtNative.setActivity
-      #   补丁 3：python3 recipe prebuild hook → 移除 -Werror=implicit-function-declaration
+      #   补丁 2：PythonActivity.java 继承 QtActivity + 直接调用 setActivity
+      #   补丁 3：python3 recipe prebuild hook → 移除 -Werror
       # ============================================================
       - name: Pre-clone p4a and patch
         run: |
@@ -167,20 +167,30 @@ jobs:
           done
 
           # ---- 2. PythonActivity.java 补丁 ----
-          #   a) 类声明后插入静态块：加载 libQt6Core 缓存 JavaVM
-          #   b) onCreate 里插入 QtNative.setActivity(this)，解决 Activity 为 null
-          echo "=== 查找所有 PythonActivity.java ==="
-          find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r JF; do
-            echo "--- 处理: $JF ---"
+          #   a) 类声明改为继承 QtActivity
+          #   b) onCreate 中直接调用 QtNative.setActivity(this)
+          echo "===== 查找所有 PythonActivity.java ====="
+          find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null > /tmp/java_files.txt || true
+          cat /tmp/java_files.txt
+          echo "========================================="
+
+          while IFS= read -r JF; do
+            [ -n "$JF" ] || continue
+            echo "### 处理: $JF"
+
             if grep -q "_p4a_activity_patched" "$JF"; then
               echo "已打过补丁，跳过"
               continue
             fi
 
-            # 用 awk 一次性完成两处插入
+            # 用 awk 一次性完成：
+            #   1. 类声明改为继承 QtActivity
+            #   2. 类声明后插入静态块（加载 Qt6Core）
+            #   3. onCreate 里直接调用 QtNative.setActivity(this)
             awk '
-            /^public class PythonActivity/ {
-                print;
+            /^public class PythonActivity extends/ {
+                # 替换为继承 QtActivity
+                print "public class PythonActivity extends org.qtproject.qt.android.bindings.QtActivity {";
                 print "    /* _p4a_activity_patched */";
                 print "    static {";
                 print "        try {";
@@ -192,20 +202,16 @@ jobs:
             /onCreate\(Bundle/ {
                 print;
                 print "        /* _p4a_activity_patched */";
-                print "        try {";
-                print "            Class<?> _qtNative = Class.forName(\"org.qtproject.qt.android.QtNative\");";
-                print "            java.lang.reflect.Method _setAct = _qtNative.getDeclaredMethod(\"setActivity\", android.app.Activity.class);";
-                print "            _setAct.setAccessible(true);";
-                print "            _setAct.invoke(null, this);";
-                print "        } catch (Throwable ignored) {}";
+                print "        org.qtproject.qt.android.QtNative.setActivity(this);";
                 next;
             }
             { print }
             ' "$JF" > "$JF.new" && mv "$JF.new" "$JF"
 
-            echo "修改后（前 45 行）:"
-            head -45 "$JF"
-          done
+            echo "--- 修改后前 40 行 ---"
+            head -40 "$JF"
+            echo "========================================="
+          done < /tmp/java_files.txt
 
           # ---- 3. python3 recipe prebuild hook（逐行 echo）----
           P3_RECIPE="$P4A/pythonforandroid/recipes/python3/__init__.py"
@@ -214,9 +220,7 @@ jobs:
             echo "# ===== Android Python 3.11.5 fix =====" >> "$P3_RECIPE"
             echo "import os as _p4a_os" >> "$P3_RECIPE"
             echo "import subprocess as _p4a_sp" >> "$P3_RECIPE"
-            echo "" >> "$P3_RECIPE"
             echo "_p4a_orig_prebuild = getattr(Python3Recipe, 'prebuild_arch', None)" >> "$P3_RECIPE"
-            echo "" >> "$P3_RECIPE"
             echo "def _p4a_android_prebuild(self, arch):" >> "$P3_RECIPE"
             echo "    if _p4a_orig_prebuild is not None:" >> "$P3_RECIPE"
             echo "        _p4a_orig_prebuild(self, arch)" >> "$P3_RECIPE"
@@ -228,7 +232,6 @@ jobs:
             echo "            print('[p4a-fix] patched configure: ' + cfg)" >> "$P3_RECIPE"
             echo "    except Exception as e:" >> "$P3_RECIPE"
             echo "        print('[p4a-fix] failed: ' + str(e))" >> "$P3_RECIPE"
-            echo "" >> "$P3_RECIPE"
             echo "Python3Recipe.prebuild_arch = _p4a_android_prebuild" >> "$P3_RECIPE"
           fi
 
@@ -244,7 +247,7 @@ jobs:
           fi
 
       # ============================================================
-      # 后台 patcher：用 awk 单行生成脚本，防止 buildozer 覆盖补丁
+      # 后台 patcher
       # ============================================================
       - name: Start background patcher
         run: |
@@ -290,7 +293,7 @@ jobs:
           echo '    fi' >> /tmp/patcher.sh
           echo '    find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r F; do' >> /tmp/patcher.sh
           echo '      if ! grep -q "_p4a_activity_patched" "$F"; then' >> /tmp/patcher.sh
-          echo '        awk "/^public class PythonActivity/ { print; print \"    /* _p4a_activity_patched */\"; print \"    static {\"; print \"        try {\"; print \"            System.loadLibrary(\\\"Qt6Core_\\\" + android.os.Build.SUPPORTED_ABIS[0]);\"; print \"        } catch (Throwable ignored) {}\"; print \"    }\"; next; } /onCreate\\(Bundle/ { print; print \"        /* _p4a_activity_patched */\"; print \"        try {\"; print \"            Class<?> _qtNative = Class.forName(\\\"org.qtproject.qt.android.QtNative\\\");\"; print \"            java.lang.reflect.Method _setAct = _qtNative.getDeclaredMethod(\\\"setActivity\\\", android.app.Activity.class);\"; print \"            _setAct.setAccessible(true);\"; print \"            _setAct.invoke(null, this);\"; print \"        } catch (Throwable ignored) {}\"; next; } { print }" "$F" > "$F.new" && mv "$F.new" "$F"' >> /tmp/patcher.sh
+          echo '        awk "/^public class PythonActivity extends/ { print \"public class PythonActivity extends org.qtproject.qt.android.bindings.QtActivity {\"; print \"    /* _p4a_activity_patched */\"; print \"    static {\"; print \"        try {\"; print \"            System.loadLibrary(\\\"Qt6Core_\\\" + android.os.Build.SUPPORTED_ABIS[0]);\"; print \"        } catch (Throwable ignored) {}\"; print \"    }\"; next; } /onCreate\\(Bundle/ { print; print \"        /* _p4a_activity_patched */\"; print \"        org.qtproject.qt.android.QtNative.setActivity(this);\"; next; } { print }" "$F" > "$F.new" && mv "$F.new" "$F"' >> /tmp/patcher.sh
           echo '        echo "$(date) activity $F" >> $LOG' >> /tmp/patcher.sh
           echo '      fi' >> /tmp/patcher.sh
           echo '    done' >> /tmp/patcher.sh
@@ -354,19 +357,13 @@ jobs:
           grep -nE ': error: |cannot find symbol' "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "无 Java 错误"
 
           echo ""
-          echo "=== 3. 实际 PythonActivity.java（前 50 行）==="
+          echo "=== 3. 构建产物中的 PythonActivity.java 前 50 行 ==="
           JAVA_FILE=$(find /home/runner/work/quiz-assistant/quiz-assistant/.buildozer/android/platform/build-arm64-v8a -name "PythonActivity.java" 2>/dev/null | head -1)
           if [ -n "$JAVA_FILE" ]; then
             echo "文件: $JAVA_FILE"
             sed -n '1,50p' "$JAVA_FILE"
           else
-            echo "未找到 PythonActivity.java"
-          fi
-
-          echo ""
-          echo "=== 4. 是否有 _p4a_activity_patched 标记 ==="
-          if [ -n "$JAVA_FILE" ]; then
-            grep -n "_p4a_activity_patched" "$JAVA_FILE" || echo "无标记"
+            echo "未找到 PythonActivity.java（可能被构建过程清理）"
           fi
 
       - name: Collect APK
