@@ -1,12 +1,14 @@
 # .github/workflows/build-apk.yml
 #
-# 完整版：包含所有诊断步骤 + 后台监控脚本
+# 完整版：
 #   - 使用 PySide6 6.9.2 + cp311 wheel
 #   - 预克隆 p4a 到两个位置并打补丁
 #   - 修改 buildozer/default.spec 加入 p4a.source_dir
 #   - 后台监控脚本：在 pyside6-android-deploy 运行时持续监视 p4a，发现 3.14 立即改为 3.11.5
 #   - NDK/SDK 路径通过命令行传入
-#   - 【修复】NDK 降级到 r26b，并在 PythonActivity 中插入静态块提前加载 Qt6Core
+#   - 【修复】NDK 降级到 r26b
+#   - 【修复】PythonActivity 中插入静态块提前加载 Qt6Core
+#   - 【新增】AndroidManifest 注入 MANAGE_EXTERNAL_STORAGE 等存储权限
 
 name: Build Android APK
 
@@ -283,6 +285,65 @@ jobs:
           echo "位置 A p4a: $(test -d "$P4A_DIR_A" && echo 存在 || echo 不存在)"
           echo "位置 B p4a: $(test -d "$P4A_DIR_B" && echo 存在 || echo 不存在)"
 
+      # ============================================================
+      # 【新增】给 AndroidManifest 模板注入存储权限
+      # ============================================================
+      - name: Patch AndroidManifest template to add storage permissions
+        run: |
+          set -e
+
+          for P4A_DIR in \
+              "$GITHUB_WORKSPACE/python-for-android" \
+              "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" ; do
+
+            if [ ! -d "$P4A_DIR" ]; then
+              echo "跳过（不存在）: $P4A_DIR"
+              continue
+            fi
+
+            echo "============================================================"
+            echo "处理 $P4A_DIR"
+            echo "============================================================"
+
+            MANIFEST_TMPL=$(find "$P4A_DIR" -name "AndroidManifest.tmpl.xml" -type f 2>/dev/null | head -1)
+            if [ -z "$MANIFEST_TMPL" ]; then
+              echo "警告：未找到 AndroidManifest.tmpl.xml，尝试列出所有 manifest 相关文件："
+              find "$P4A_DIR" -name "AndroidManifest*" -type f 2>/dev/null | head -20
+              continue
+            fi
+
+            echo "找到 manifest 模板: $MANIFEST_TMPL"
+
+            if grep -q "MANAGE_EXTERNAL_STORAGE" "$MANIFEST_TMPL"; then
+              echo "已包含 MANAGE_EXTERNAL_STORAGE 权限，跳过。"
+              grep -n "MANAGE_EXTERNAL_STORAGE" "$MANIFEST_TMPL" || true
+              continue
+            fi
+
+            echo "======== 修改前：manifest 中 uses-permission 相关行 ========"
+            grep -n "uses-permission\|<application" "$MANIFEST_TMPL" || true
+
+            awk '
+              /<application/ && !done {
+                print "    <uses-permission android:name=\"android.permission.MANAGE_EXTERNAL_STORAGE\" />";
+                print "    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\" android:maxSdkVersion=\"32\" />";
+                print "    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\" />";
+                done=1
+              }
+              { print }
+            ' "$MANIFEST_TMPL" > "${MANIFEST_TMPL}.new" && mv "${MANIFEST_TMPL}.new" "$MANIFEST_TMPL"
+
+            echo "======== 修改后：manifest 中 uses-permission 相关行 ========"
+            grep -n "uses-permission\|<application" "$MANIFEST_TMPL" || true
+
+            echo "======== 验证注入是否成功 ========"
+            if grep -q "MANAGE_EXTERNAL_STORAGE" "$MANIFEST_TMPL"; then
+              echo "✅ MANAGE_EXTERNAL_STORAGE 注入成功"
+            else
+              echo "❌ 注入失败"
+            fi
+          done
+
       - name: Patch buildozer default.spec to use our p4a
         run: |
           source $HOME/venv/bin/activate
@@ -354,6 +415,20 @@ jobs:
                     echo "[Patcher] $(date) 修改完成" >> "$LOG"
                   fi
                 done
+
+                MANIFEST_TMPL="$P4A_DIR/pythonforandroid/bootstraps/qt/build/templates/AndroidManifest.tmpl.xml"
+                if [ -f "$MANIFEST_TMPL" ] && ! grep -q "MANAGE_EXTERNAL_STORAGE" "$MANIFEST_TMPL"; then
+                  echo "[Patcher] $(date) 补注入 MANAGE_EXTERNAL_STORAGE: $MANIFEST_TMPL" >> "$LOG"
+                  awk '
+                    /<application/ && !done {
+                      print "    <uses-permission android:name=\"android.permission.MANAGE_EXTERNAL_STORAGE\" />";
+                      print "    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\" android:maxSdkVersion=\"32\" />";
+                      print "    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\" />";
+                      done=1
+                    }
+                    { print }
+                  ' "$MANIFEST_TMPL" > "${MANIFEST_TMPL}.new" && mv "${MANIFEST_TMPL}.new" "$MANIFEST_TMPL"
+                fi
               fi
             done
             sleep 1
@@ -394,6 +469,10 @@ jobs:
           echo "======== 运行前：位置 B p4a recipe ========"
           grep -nE "^[[:space:]]*version[[:space:]]*=" "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android/pythonforandroid/recipes/python3/__init__.py" || true
 
+          echo "======== 运行前：manifest 权限 ========"
+          grep -n "MANAGE_EXTERNAL_STORAGE" "$GITHUB_WORKSPACE/python-for-android/pythonforandroid/bootstraps/qt/build/templates/AndroidManifest.tmpl.xml" 2>/dev/null || echo "位置 A 无权限"
+          grep -n "MANAGE_EXTERNAL_STORAGE" "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android/pythonforandroid/bootstraps/qt/build/templates/AndroidManifest.tmpl.xml" 2>/dev/null || echo "位置 B 无权限"
+
           echo "======== 运行前：default.spec 中的 p4a.source_dir ========"
           grep "p4a.source_dir" "$VIRTUAL_ENV/lib/python3.11/site-packages/buildozer/default.spec" || true
 
@@ -422,25 +501,17 @@ jobs:
           echo "======== Patcher 日志 ========"
           cat /tmp/patcher.log || echo "无 patcher 日志"
 
-          echo "======== deploy 后：位置 A p4a recipe ========"
-          grep -nE "^[[:space:]]*version[[:space:]]*=" "$GITHUB_WORKSPACE/python-for-android/pythonforandroid/recipes/python3/__init__.py" 2>/dev/null || echo "位置 A 不存在"
+          echo "======== 查找所有 AndroidManifest.xml（构建产物） ========"
+          find "$GITHUB_WORKSPACE" -name "AndroidManifest.xml" -path "*build*" 2>/dev/null | head -20 || true
 
-          echo "======== deploy 后：位置 B p4a recipe ========"
-          grep -nE "^[[:space:]]*version[[:space:]]*=" "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android/pythonforandroid/recipes/python3/__init__.py" 2>/dev/null || echo "位置 B 不存在"
-
-          echo "======== deploy 后：查找所有 python-for-android 目录 ========"
-          find / -type d -name "python-for-android" 2>/dev/null | head -20 || true
-
-          echo "======== deploy 后：查找所有 libpython3.14.so ========"
-          find / -name "libpython3.14.so" 2>/dev/null | head -20 || true
+          echo "======== 检查构建产物中的 MANAGE_EXTERNAL_STORAGE ========"
+          for MF in $(find "$GITHUB_WORKSPACE" -name "AndroidManifest.xml" 2>/dev/null | head -10); do
+            echo "---- $MF ----"
+            grep -n "MANAGE_EXTERNAL_STORAGE\|READ_EXTERNAL_STORAGE\|WRITE_EXTERNAL_STORAGE" "$MF" || echo "(无存储权限)"
+          done
 
           echo "======== deploy 后：查找所有 libpython3.11.so ========"
           find / -name "libpython3.11.so" 2>/dev/null | head -20 || true
-
-          echo "======== build.log 中 p4a 相关行 ========"
-          if [ -f "$GITHUB_WORKSPACE/build.log" ]; then
-            grep -nE "python-for-android|p4a|buildozer|Cloning|3\.14|3\.11" "$GITHUB_WORKSPACE/build.log" | head -80 || true
-          fi
 
           echo "======== build.log 末尾 50 行 ========"
           if [ -f "$GITHUB_WORKSPACE/build.log" ]; then
@@ -477,10 +548,8 @@ jobs:
           ls -la
           echo "=== 查找所有 APK 文件 ==="
           find . -type f -name "*.apk" 2>/dev/null || echo "未找到任何 APK 文件"
-          echo "=== 查找所有 AAB 文件 ==="
-          find . -type f -name "*.aab" 2>/dev/null || echo "未找到任何 AAB 文件"
 
-      - name: Verify APK contains libpython3.11.so
+      - name: Verify APK contents
         if: always()
         run: |
           APK=$(find dist -name "*.apk" | head -1)
@@ -489,28 +558,22 @@ jobs:
             exit 0
           fi
           echo "检查 APK: $APK"
-          echo "=== lib/arm64-v8a/ 中的 libpython 和 libshiboken ==="
-          unzip -l "$APK" | grep -E "libpython|libshiboken|libc\+\+" || true
+
           echo ""
-          echo "=== 关键判定 ==="
-          if unzip -l "$APK" | grep -q "libpython3.11.so"; then
-            echo "✅ APK 中包含 libpython3.11.so"
-          elif unzip -l "$APK" | grep -q "libpython3.14.so"; then
-            echo "❌ APK 中仍然是 libpython3.14.so —— p4a 补丁没有生效"
+          echo "=== 用 aapt 检查 APK 权限声明 ==="
+          AAPT=$(find "$ANDROID_HOME/build-tools" -name "aapt2" 2>/dev/null | head -1)
+          if [ -z "$AAPT" ]; then
+            AAPT=$(find "$ANDROID_HOME/build-tools" -name "aapt" 2>/dev/null | head -1)
+          fi
+          if [ -n "$AAPT" ]; then
+            "$AAPT" dump permissions "$APK" || "$AAPT" dump badging "$APK" | grep -i "permission" || true
           else
-            echo "❌ APK 中没有任何 libpython3.x.so"
+            echo "未找到 aapt/aapt2，改用 unzip + grep 检查 AndroidManifest（二进制，可能不可读）"
           fi
 
-          echo "=== 检查 libc++_shared.so 是否包含 std::pmr 符号 ==="
-          mkdir -p /tmp/apkcheck
-          unzip -o "$APK" "lib/arm64-v8a/libc++_shared.so" -d /tmp/apkcheck 2>/dev/null || true
-          if [ -f /tmp/apkcheck/lib/arm64-v8a/libc++_shared.so ]; then
-            READELF=$(find "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin" -name "llvm-readelf" 2>/dev/null | head -1)
-            if [ -n "$READELF" ]; then
-              echo "使用 llvm-readelf 检查符号..."
-              "$READELF" -sW /tmp/apkcheck/lib/arm64-v8a/libc++_shared.so | grep -i "monotonic_buffer_resource" && echo "✅ 找到 pmr 符号" || echo "❌ 未找到 pmr 符号"
-            fi
-          fi
+          echo ""
+          echo "=== lib/arm64-v8a/ 中的 libpython ==="
+          unzip -l "$APK" | grep -E "libpython|libshiboken|libQt6Core|libQt6Quick" || true
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
