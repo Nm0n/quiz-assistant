@@ -182,7 +182,7 @@ jobs:
           echo "SHA256 = $SHA256"
 
       # ============================================================
-      # Pre-clone p4a + 打补丁（recipe / JNI / manifest）
+      # Pre-clone p4a + 打补丁（recipe / Java / manifest）
       # ============================================================
       - name: Pre-clone p4a to both locations and patch
         run: |
@@ -215,35 +215,26 @@ jobs:
               sed -i -E "s/^([[:space:]]*sha256[[:space:]]*=[[:space:]]*)['\"][a-fA-F0-9]+['\"]/\1'${PY_TARBALL_SHA256}'/" "$RECIPE_FILE"
               sed -i -E "s|/3\.14\.[0-9]+/Python-3\.14\.[0-9]+\.tar\.xz|/${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz|g" "$RECIPE_FILE"
 
-              grep -nE "version|md5sum|sha256|url" "$RECIPE_FILE" | head -20
+              grep -nE "^[[:space:]]*version[[:space:]]*=|md5sum|sha256" "$RECIPE_FILE" | head -10
             done
 
-            # ---------- 2. JNI 修复：PythonActivity.java ----------
+            # ---------- 2. JNI 修复：所有 PythonActivity.java 都打补丁 ----------
             echo ""
-            echo "======== 修复 JNI 初始化顺序 ========"
+            echo "======== 修复 JNI 初始化顺序（全部 PythonActivity.java） ========"
 
-            # 精确优先：Qt bootstrap 的路径
-            JAVA_FILE="$P4A_DIR/pythonforandroid/bootstraps/qt/build/src/org/kivy/android/PythonActivity.java"
+            find "$P4A_DIR" -name "PythonActivity.java" -type f 2>/dev/null > /tmp/java_list.txt
+            echo "---- 所有匹配文件 ----"
+            cat /tmp/java_list.txt
 
-            if [ ! -f "$JAVA_FILE" ]; then
-              echo "精确路径不存在，改用 find 搜索..."
-              JAVA_FILE=$(grep -rl "class PythonActivity" "$P4A_DIR" --include="PythonActivity.java" 2>/dev/null | head -1)
-            fi
+            while IFS= read -r jf; do
+              [ -f "$jf" ] || continue
+              grep -q "class PythonActivity" "$jf" 2>/dev/null || continue
 
-            if [ -z "$JAVA_FILE" ] || [ ! -f "$JAVA_FILE" ]; then
-              echo "!!! 致命错误：找不到任何 PythonActivity.java"
-              find "$P4A_DIR" -name "PythonActivity.java" 2>/dev/null || true
-              exit 1
-            fi
+              if grep -q "loadQt6CoreFirst" "$jf" 2>/dev/null; then
+                echo "  已存在补丁: $jf"
+                continue
+              fi
 
-            echo "目标文件: $JAVA_FILE"
-            echo "---- 修改前：类声明片段 ----"
-            grep -nE "class PythonActivity" "$JAVA_FILE" || true
-
-            if grep -q "loadQt6CoreFirst" "$JAVA_FILE"; then
-              echo "已存在 JNI 补丁，跳过插入。"
-            else
-              # 用 awk：匹配任何含 "class PythonActivity" 的行，宽松
               awk '
                 /class[ \t]+PythonActivity/ && !inserted {
                     print
@@ -259,20 +250,30 @@ jobs:
                     next
                 }
                 { print }
-              ' "$JAVA_FILE" > "$JAVA_FILE.new"
-              mv "$JAVA_FILE.new" "$JAVA_FILE"
-              echo "已用 awk 插入静态块。"
-            fi
+              ' "$jf" > "$jf.new"
+              mv "$jf.new" "$jf"
+              echo "  已打补丁: $jf"
+            done < /tmp/java_list.txt
 
-            # 强制验证
-            if ! grep -q "loadQt6CoreFirst" "$JAVA_FILE"; then
-              echo "!!! 致命错误：JNI 补丁未生效，$JAVA_FILE 中找不到 loadQt6CoreFirst"
-              echo "---- 当前文件前 30 行 ----"
-              head -30 "$JAVA_FILE"
+            # ---------- 强制验证：qt bootstrap 下的那个必须被打上 ----------
+            QT_JAVA=$(find "$P4A_DIR" -path "*bootstraps/qt*" -name "PythonActivity.java" -type f 2>/dev/null | head -1)
+
+            if [ -z "$QT_JAVA" ]; then
+              echo "!!! 致命错误：找不到 bootstraps/qt 下的 PythonActivity.java"
+              echo "---- bootstraps/qt 目录树 ----"
+              find "$P4A_DIR/pythonforandroid/bootstraps/qt" -type f -name "*.java" 2>/dev/null | head -20 || true
               exit 1
             fi
-            echo "---- 修改后的类声明片段 ----"
-            grep -A 10 "loadQt6CoreFirst" "$JAVA_FILE" || true
+
+            if ! grep -q "loadQt6CoreFirst" "$QT_JAVA" 2>/dev/null; then
+              echo "!!! 致命错误：Qt bootstrap 的 PythonActivity.java 未被打上补丁"
+              echo "---- 目标文件: $QT_JAVA ----"
+              head -40 "$QT_JAVA"
+              exit 1
+            fi
+
+            echo "✅ Qt bootstrap 补丁确认: $QT_JAVA"
+            grep -A 8 "loadQt6CoreFirst" "$QT_JAVA" | head -10
 
             # ---------- 3. manifest 权限注入 ----------
             echo ""
@@ -330,7 +331,7 @@ jobs:
           grep -nE "^[[:space:]]*version[[:space:]]*=" "$PLATFORM_DIR/python-for-android/pythonforandroid/recipes/python3/__init__.py" || true
 
       # ============================================================
-      # 后台 patcher：监控 recipe + Java + manifest
+      # 后台 patcher：监控 recipe + 所有 Java + manifest
       # ============================================================
       - name: Start background p4a patcher
         run: |
@@ -382,6 +383,7 @@ jobs:
           }
 
           while true; do
+              # p4a 源码位置
               for P4A_DIR in \
                 "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" \
                 "$GITHUB_WORKSPACE/python-for-android" \
@@ -401,7 +403,7 @@ jobs:
                       fi
                   done
 
-                  # Java
+                  # Java（所有 PythonActivity.java）
                   find "$P4A_DIR" -name "PythonActivity.java" -type f 2>/dev/null > /tmp/java_list.txt
                   while IFS= read -r jf; do
                       patch_java "$jf"
@@ -419,6 +421,12 @@ jobs:
                 "$HOME/.buildozer/android/platform/build-arm64-v8a/dists" \
                 "$GITHUB_WORKSPACE/.buildozer/android/platform/build-arm64-v8a/dists" ; do
                   [ -d "$DIST_DIR" ] || continue
+
+                  find "$DIST_DIR" -name "PythonActivity.java" -type f 2>/dev/null > /tmp/java_list2.txt
+                  while IFS= read -r jf; do
+                      patch_java "$jf"
+                  done < /tmp/java_list2.txt
+
                   find "$DIST_DIR" -name "AndroidManifest*.xml" -type f 2>/dev/null > /tmp/manifest_list2.txt
                   while IFS= read -r mf; do
                       inject_manifest "$mf"
@@ -478,19 +486,31 @@ jobs:
           echo "======== Patcher 日志 ========"
           cat /tmp/patcher.log || echo "无 patcher 日志"
 
-          echo "======== 检查 deploy 后的 PythonActivity.java ========"
-          for jf in $(find / -name "PythonActivity.java" 2>/dev/null | head -20); do
+          echo "======== deploy 后：所有 PythonActivity.java 的补丁状态 ========"
+          for jf in $(find / -name "PythonActivity.java" 2>/dev/null | head -30); do
             if grep -q "loadQt6CoreFirst" "$jf" 2>/dev/null; then
-              echo "✅ $jf 含 loadQt6CoreFirst"
+              echo "✅ $jf"
             else
-              echo "❌ $jf 不含 loadQt6CoreFirst"
+              echo "❌ $jf"
             fi
           done
 
-          echo "======== 检查 manifest 权限 ========"
+          echo "======== deploy 后：qt bootstrap 的补丁检查 ========"
+          QT_JAVA=$(find / -path "*bootstraps/qt*" -name "PythonActivity.java" -type f 2>/dev/null | head -1)
+          if [ -n "$QT_JAVA" ]; then
+            if grep -q "loadQt6CoreFirst" "$QT_JAVA"; then
+              echo "✅ Qt bootstrap 已打补丁: $QT_JAVA"
+            else
+              echo "❌ Qt bootstrap 未打补丁: $QT_JAVA"
+            fi
+          else
+            echo "未找到 bootstraps/qt 的 PythonActivity.java"
+          fi
+
+          echo "======== manifest 权限检查 ========"
           for mf in $(find / -name "AndroidManifest*.xml" 2>/dev/null | head -40); do
             if grep -q "MANAGE_EXTERNAL_STORAGE" "$mf" 2>/dev/null; then
-              echo "✅ $mf 包含 MANAGE_EXTERNAL_STORAGE"
+              echo "✅ $mf"
             fi
           done
 
@@ -530,9 +550,6 @@ jobs:
           ls -la
           find . -type f -name "*.apk" 2>/dev/null || echo "未找到 APK"
 
-      # ============================================================
-      # 验证 APK 内容
-      # ============================================================
       - name: Verify APK contents
         if: always()
         run: |
@@ -560,12 +577,12 @@ jobs:
           unzip -o "$APK" "classes*.dex" -d /tmp/apkcheck_dex 2>/dev/null || true
           if ls /tmp/apkcheck_dex/classes*.dex >/dev/null 2>&1; then
             if strings /tmp/apkcheck_dex/classes*.dex | grep -q "Qt6Core_"; then
-              echo "✅ dex 中含 Qt6Core_ 字符串，Java 补丁已打进 APK"
+              echo "✅ dex 含 Qt6Core_ 字符串"
             else
-              echo "❌ dex 中未找到 Qt6Core_ 字符串，Java 补丁未生效"
+              echo "❌ dex 未含 Qt6Core_ 字符串"
             fi
             if strings /tmp/apkcheck_dex/classes*.dex | grep -q "loadQt6CoreFirst"; then
-              echo "✅ dex 中含 loadQt6CoreFirst 标记"
+              echo "✅ dex 含 loadQt6CoreFirst 标记"
             fi
           fi
 
