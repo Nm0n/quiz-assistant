@@ -87,9 +87,16 @@ jobs:
           yes | sdkmanager --licenses || true
           yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
           test -d "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" || (echo "NDK 安装失败" && exit 1)
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_PATH=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Export environment variables (覆盖 runner 预装 NDK)
+        run: |
+          NDK="$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_PATH=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_LATEST_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$NDK" >> "$GITHUB_ENV"
 
       - name: Install system dependencies
         run: |
@@ -108,7 +115,6 @@ jobs:
           pip install "PySide6==${PYSIDE_VERSION}" "shiboken6==${PYSIDE_VERSION}"
           pip install packaging jinja2 pkginfo tqdm
           pip install buildozer cython virtualenv
-          pip list | grep -i -E "pyside|shiboken|buildozer"
 
       - name: Download Android Wheels
         run: |
@@ -127,7 +133,7 @@ jobs:
             test -e "$f" || (echo "缺少 $f" && exit 1)
           done
 
-      - name: Download Python ${{ env.TARGET_PYTHON }} and compute checksums
+      - name: Download Python and compute checksums
         run: |
           cd /tmp
           wget -q "https://www.python.org/ftp/python/${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz"
@@ -135,9 +141,17 @@ jobs:
           SHA256=$(sha256sum "Python-${TARGET_PYTHON}.tar.xz" | awk '{print $1}')
           echo "PY_TARBALL_MD5=$MD5" >> "$GITHUB_ENV"
           echo "PY_TARBALL_SHA256=$SHA256" >> "$GITHUB_ENV"
-          echo "MD5=$MD5  SHA256=$SHA256"
 
-      - name: Pre-clone p4a and initial patch
+      # ============================================================
+      # 预克隆 p4a + 初始补丁
+      # 补丁内容：
+      #   1. python3/hostpython3 recipe 的 version 改为 3.11.5
+      #   2. PythonActivity.java 提前加载 Qt6Core（解决 SIGSEGV）
+      #   3. ★ 给 python3 recipe 追加 prebuild_arch hook
+      #      该 hook 会在 Python 源码解压后，sed 掉 configure 中的
+      #      -Werror=implicit-function-declaration，解决 grpmodule.c 编译失败
+      # ============================================================
+      - name: Pre-clone p4a and patch
         run: |
           set -e
           P4A="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android"
@@ -145,6 +159,7 @@ jobs:
           mkdir -p "$(dirname "$P4A")"
           git clone -b develop --single-branch https://github.com/kivy/python-for-android.git "$P4A"
 
+          # ---- 1. python3 / hostpython3 recipe 版本补丁 ----
           for R in python3 hostpython3; do
             RF="$P4A/pythonforandroid/recipes/$R/__init__.py"
             [ -f "$RF" ] || continue
@@ -154,6 +169,7 @@ jobs:
             sed -i -E "s|/3\.14\.[0-9]+/Python-3\.14\.[0-9]+\.tar\.xz|/${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz|g" "$RF"
           done
 
+          # ---- 2. PythonActivity.java 提前加载 Qt6Core ----
           find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r JF; do
             if ! grep -q "loadQt6CoreFirst" "$JF"; then
               sed -i '/^public class PythonActivity/a\
@@ -161,21 +177,43 @@ jobs:
             fi
           done
 
-          find "$P4A/pythonforandroid/bootstraps" -name "AndroidManifest.tmpl.xml" -type f 2>/dev/null | while IFS= read -r MF; do
-            if ! grep -q "MANAGE_EXTERNAL_STORAGE" "$MF"; then
-              awk '
-                /<application/ && !done {
-                  print "    <uses-permission android:name=\"android.permission.MANAGE_EXTERNAL_STORAGE\" />";
-                  print "    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\" android:maxSdkVersion=\"32\" />";
-                  print "    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\" />";
-                  done=1
-                }
-                { print }
-              ' "$MF" > "${MF}.new" && mv "${MF}.new" "$MF"
-            fi
-          done
+          # ---- 3. ★ 关键修复：给 python3 recipe 追加 prebuild hook ----
+          P3_RECIPE="$P4A/pythonforandroid/recipes/python3/__init__.py"
+          if ! grep -q "_p4a_android_prebuild" "$P3_RECIPE"; then
+            cat >> "$P3_RECIPE" << 'RECIPE_HOOK_EOF'
 
-      - name: Patch buildozer default.spec
+
+# ===== Android Python 3.11.5 fix =====
+# Python 3.11 的 configure 会用 -Werror=implicit-function-declaration
+# 让 grpmodule.c 编译失败（Android Bionic libc 没有 setgrent/getgrent/endgrent）
+# 在配置前 sed 掉这个 flag，让它只是 warning 而不是 error
+import os as _p4a_os
+import subprocess as _p4a_sp
+
+_p4a_orig_prebuild = getattr(Python3Recipe, 'prebuild_arch', None)
+
+def _p4a_android_prebuild(self, arch):
+    if _p4a_orig_prebuild is not None:
+        _p4a_orig_prebuild(self, arch)
+    try:
+        bd = self.get_build_dir(arch.arch)
+        cfg = _p4a_os.path.join(bd, 'configure')
+        if _p4a_os.path.exists(cfg):
+            _p4a_sp.call([
+                'sed', '-i',
+                's/-Werror=implicit-function-declaration//g',
+                cfg
+            ])
+            print('[p4a-fix] patched configure (removed -Werror=implicit-function-declaration): ' + cfg)
+    except Exception as e:
+        print('[p4a-fix] failed to patch configure: ' + str(e))
+
+Python3Recipe.prebuild_arch = _p4a_android_prebuild
+RECIPE_HOOK_EOF
+            echo "已给 python3 recipe 追加 prebuild hook"
+          fi
+
+      - name: Patch default.spec (p4a.source_dir)
         run: |
           source $HOME/venv/bin/activate
           DS="$VIRTUAL_ENV/lib/python3.11/site-packages/buildozer/default.spec"
@@ -187,7 +225,8 @@ jobs:
           fi
 
       # ============================================================
-      # 后台 patcher
+      # 后台 patcher：持续保护补丁（防止 buildozer 覆盖）
+      # 包含：recipe version、recipe prebuild hook、PythonActivity、manifest 不动
       # ============================================================
       - name: Start background patcher
         run: |
@@ -208,6 +247,8 @@ jobs:
               "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" \
               "$HOME/.buildozer/android/platform/python-for-android"; do
               [ -d "$P4A" ] || continue
+
+              # --- recipe version ---
               for R in python3 hostpython3; do
                 F="$P4A/pythonforandroid/recipes/$R/__init__.py"
                 if [ -f "$F" ] && grep -qE "version = .3\.14\." "$F"; then
@@ -218,25 +259,46 @@ jobs:
                   echo "$(date) recipe $F" >> "$LOG"
                 fi
               done
+
+              # --- recipe prebuild hook ---
+              P3="$P4A/pythonforandroid/recipes/python3/__init__.py"
+              if [ -f "$P3" ] && ! grep -q "_p4a_android_prebuild" "$P3"; then
+                cat >> "$P3" << 'RECIPE_HOOK_EOF2'
+
+
+# ===== Android Python 3.11.5 fix =====
+import os as _p4a_os
+import subprocess as _p4a_sp
+
+_p4a_orig_prebuild = getattr(Python3Recipe, 'prebuild_arch', None)
+
+def _p4a_android_prebuild(self, arch):
+    if _p4a_orig_prebuild is not None:
+        _p4a_orig_prebuild(self, arch)
+    try:
+        bd = self.get_build_dir(arch.arch)
+        cfg = _p4a_os.path.join(bd, 'configure')
+        if _p4a_os.path.exists(cfg):
+            _p4a_sp.call([
+                'sed', '-i',
+                's/-Werror=implicit-function-declaration//g',
+                cfg
+            ])
+            print('[p4a-fix] patched configure: ' + cfg)
+    except Exception as e:
+        print('[p4a-fix] failed: ' + str(e))
+
+Python3Recipe.prebuild_arch = _p4a_android_prebuild
+RECIPE_HOOK_EOF2
+                echo "$(date) hook added $P3" >> "$LOG"
+              fi
+
+              # --- PythonActivity ---
               find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r F; do
                 if ! grep -q "loadQt6CoreFirst" "$F"; then
                   sed -i '/^public class PythonActivity/a\
           /* loadQt6CoreFirst */ static { try { String abi = android.os.Build.SUPPORTED_ABIS[0]; System.loadLibrary("Qt6Core_" + abi); } catch (Throwable t) { t.printStackTrace(); } }' "$F"
                   echo "$(date) activity $F" >> "$LOG"
-                fi
-              done
-              find "$P4A/pythonforandroid/bootstraps" -name "AndroidManifest.tmpl.xml" -type f 2>/dev/null | while IFS= read -r F; do
-                if ! grep -q "MANAGE_EXTERNAL_STORAGE" "$F"; then
-                  awk '
-                    /<application/ && !done {
-                      print "    <uses-permission android:name=\"android.permission.MANAGE_EXTERNAL_STORAGE\" />";
-                      print "    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\" android:maxSdkVersion=\"32\" />";
-                      print "    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\" />";
-                      done=1
-                    }
-                    { print }
-                  ' "$F" > "${F}.new" && mv "${F}.new" "$F"
-                  echo "$(date) manifest $F" >> "$LOG"
                 fi
               done
             done
@@ -246,6 +308,8 @@ jobs:
           chmod +x /tmp/patcher.sh
           nohup /tmp/patcher.sh > /dev/null 2>&1 &
           echo "$!" > /tmp/patcher.pid
+          sleep 2
+          cat /tmp/patcher.log || true
 
       # ============================================================
       # 核心构建
@@ -268,16 +332,8 @@ jobs:
           EXIT_CODE=$?
           set -e
 
-          # 剥离 ANSI 颜色码
           sed 's/\x1b\[[0-9;]*m//g' /tmp/deploy_raw.log > "$GITHUB_WORKSPACE/build.log"
-
-          echo "pyside6-android-deploy 退出码: $EXIT_CODE"
-          echo ""
-          echo "=== 剥离 ANSI 后的 build.log 前 30 行 ==="
-          head -30 "$GITHUB_WORKSPACE/build.log" || true
-          echo ""
-          echo "=== build.log 末尾 60 行 ==="
-          tail -60 "$GITHUB_WORKSPACE/build.log" || true
+          echo "退出码: $EXIT_CODE"
 
       - name: Stop patcher
         if: always()
@@ -286,6 +342,9 @@ jobs:
           echo "=== Patcher 日志 ==="
           cat /tmp/patcher.log || true
 
+      # ============================================================
+      # 诊断
+      # ============================================================
       - name: Diagnostics
         if: always()
         run: |
@@ -293,31 +352,43 @@ jobs:
             echo "无 build.log"
             exit 0
           fi
-          echo "=== 1. [ERROR] ==="
-          grep -n '\[ERROR\]' "$GITHUB_WORKSPACE/build.log" | tail -20 || echo "无 [ERROR]"
+
+          echo "=== 1. [p4a-fix] hook 是否被调用 ==="
+          grep -n "p4a-fix" "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "hook 没被调用"
+
           echo ""
-          echo "=== 2. Traceback / RuntimeError ==="
-          grep -nE 'Traceback|RuntimeError|CalledProcessError' "$GITHUB_WORKSPACE/build.log" | tail -20 || echo "无"
+          echo "=== 2. [ERROR] ==="
+          grep -n '\[ERROR\]' "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "无 [ERROR]"
+
           echo ""
-          echo "=== 3. make/gcc 报错 ==="
-          grep -nE 'make(\[[0-9]+\])?: \*\*\*|error: ' "$GITHUB_WORKSPACE/build.log" | tail -20 || echo "无"
+          echo "=== 3. 编译错误（error: ，过滤 -Werror 干扰）==="
+          grep -nE ': error: |make(\[[0-9]+\])?: \*\*\*' "$GITHUB_WORKSPACE/build.log" | grep -v "implicit-function-declaration" | tail -20 || echo "无"
+
           echo ""
-          echo "=== 4. 'Buildozer failed' 上下文 80 行 ==="
-          FAIL_LINE=$(grep -n "Buildozer failed to execute" "$GITHUB_WORKSPACE/build.log" | head -1 | cut -d: -f1)
+          echo "=== 4. 编译 warning -Wimplicit-function-declaration（确认补丁生效）==="
+          grep -nE "implicit-function-declaration" "$GITHUB_WORKSPACE/build.log" | head -5 || echo "无"
+
+          echo ""
+          echo "=== 5. gradle 失败位置 ==="
+          grep -n "gradlew failed" "$GITHUB_WORKSPACE/build.log" | head -3 || echo "无 gradle 失败"
+
+          echo ""
+          echo "=== 6. gradle 之前 80 行 ==="
+          FAIL_LINE=$(grep -n "gradlew failed" "$GITHUB_WORKSPACE/build.log" | head -1 | cut -d: -f1)
           if [ -n "$FAIL_LINE" ]; then
             START=$((FAIL_LINE - 80))
             [ "$START" -lt 1 ] && START=1
             sed -n "${START},${FAIL_LINE}p" "$GITHUB_WORKSPACE/build.log"
-          else
-            echo "未找到，打印末尾 80 行"
-            tail -80 "$GITHUB_WORKSPACE/build.log"
           fi
+
+          echo ""
+          echo "=== 7. Traceback 位置 ==="
+          grep -nE 'Traceback|RuntimeError|CalledProcessError' "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "无"
 
       - name: Collect APK
         if: always()
         run: |
           mkdir -p dist
-          echo "=== 全盘搜索 APK ==="
           find /home/runner -type f -name "*.apk" 2>/dev/null | tee /tmp/apk_list.txt || true
           if [ -s /tmp/apk_list.txt ]; then
             while IFS= read -r apk; do
@@ -329,7 +400,6 @@ jobs:
               cp "$apk" dist/ 2>/dev/null && echo "复制: $apk"
             done < /tmp/apk_list.txt
           fi
-          echo "=== dist/ 内容 ==="
           ls -lh dist/ 2>/dev/null || echo "dist/ 为空"
 
       - name: Upload APK
@@ -341,7 +411,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Upload build.log
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
