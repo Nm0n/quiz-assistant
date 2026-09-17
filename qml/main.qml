@@ -1,9 +1,7 @@
 // qml/main.qml
-// 主窗口：布局、顶部状态区、进度条、题目区域、底部按钮区、抽屉菜单。
-//
-// 文件加载策略：
-//   - Android：打开应用内 filePickerDialog（扫描专属目录，无 Activity 切换）
-//   - 桌面：打开 QML FileDialog（原有逻辑）
+// 主窗口。文件选择策略：
+//   - Android：应用内文件浏览器（Qt.platform.os === "android" 判断，不依赖 bridge.isAndroid）
+//   - 桌面：QML FileDialog
 
 import QtQuick
 import QtQuick.Controls
@@ -18,9 +16,9 @@ ApplicationWindow {
     height: 800
     color: "#f0f2f5"
 
-    // ============================================================
-    // 视图状态
-    // ============================================================
+    // ★★ 版本标识：这一行是新版标记，构建后请确认状态栏能看到 "v3" ★★
+    readonly property string buildTag: "v3"
+
     readonly property var viewState: bridge.viewState
 
     readonly property var currentQuestion: {
@@ -42,7 +40,10 @@ ApplicationWindow {
 
     readonly property bool excelImportEnabled: false
 
-    title: "智能刷题助手 - " + fileLabel + modifiedMark
+    // ★★ 用 Qt 内建平台检测，最可靠 ★★
+    readonly property bool isAndroidPlatform: Qt.platform.os === "android"
+
+    title: "智能刷题助手 " + buildTag + " - " + fileLabel + modifiedMark
 
     // ============================================================
     // 内联组件
@@ -119,7 +120,7 @@ ApplicationWindow {
     }
 
     // ============================================================
-    // 应用内文件浏览器（Android 使用）
+    // 应用内文件浏览器（Android）
     // ============================================================
     Dialog {
         id: filePickerDialog
@@ -152,7 +153,7 @@ ApplicationWindow {
                 // ---- 顶部：目录提示 ----
                 Rectangle {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 96
+                    Layout.preferredHeight: 110
                     color: "#f5f7fa"
 
                     ColumnLayout {
@@ -166,7 +167,7 @@ ApplicationWindow {
 
                             Text {
                                 Layout.fillWidth: true
-                                text: "📁 文件目录"
+                                text: "📁 文件目录 " + appWindow.buildTag
                                 font.pixelSize: 13
                                 font.bold: true
                                 color: "#303133"
@@ -206,7 +207,6 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
 
-                    // 空目录提示
                     Column {
                         anchors.centerIn: parent
                         width: parent.width - 48
@@ -229,7 +229,7 @@ ApplicationWindow {
                         }
                         Text {
                             width: parent.width
-                            text: "请用 USB 连接电脑，或使用系统「文件」应用，把 .json 文件复制到上面的目录，然后点击「刷新」。"
+                            text: "请把 .json 文件复制到上面的目录，然后点击「刷新」。\n\n可以用系统的「文件管理」应用，或用 USB 连接电脑操作。"
                             wrapMode: Text.WordWrap
                             font.pixelSize: 12
                             color: "#909399"
@@ -238,7 +238,6 @@ ApplicationWindow {
                         }
                     }
 
-                    // 文件列表
                     ListView {
                         anchors.fill: parent
                         anchors.margins: 8
@@ -316,6 +315,29 @@ ApplicationWindow {
     }
 
     // ============================================================
+    // 存储权限引导对话框
+    // ============================================================
+    Dialog {
+        id: permissionDialog
+        title: "需要文件访问权限"
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(appWindow.width - 40, 360)
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        onAccepted: bridge.openStoragePermissionSettings()
+        onRejected: close()
+
+        contentItem: Text {
+            text: "本应用需要「所有文件访问」权限，才能读取你放在「下载」目录里的题库文件。\n\n" +
+                  "点击「确定」将打开系统设置页面，请找到「智能刷题助手」，开启「允许访问所有文件」。\n\n" +
+                  "开启后回到应用，再次点击「打开题库」即可。"
+            wrapMode: Text.WordWrap
+            font.pixelSize: 13
+            color: "#303133"
+        }
+    }
+
+    // ============================================================
     // 桌面端文件对话框
     // ============================================================
     FileDialog {
@@ -328,9 +350,7 @@ ApplicationWindow {
             console.log("[FileDialog] openJson accepted: " + path)
             bridge.loadFromJson(path)
         }
-        onRejected: {
-            console.log("[FileDialog] openJson rejected")
-        }
+        onRejected: console.log("[FileDialog] openJson rejected")
     }
 
     FileDialog {
@@ -345,9 +365,7 @@ ApplicationWindow {
             console.log("[FileDialog] saveJson accepted: " + path)
             bridge.saveToFile(path)
         }
-        onRejected: {
-            console.log("[FileDialog] saveJson rejected")
-        }
+        onRejected: console.log("[FileDialog] saveJson rejected")
     }
 
     FileDialog {
@@ -360,19 +378,20 @@ ApplicationWindow {
             console.log("[FileDialog] importExcel accepted: " + path)
             bridge.loadFromExcel(path)
         }
-        onRejected: {
-            console.log("[FileDialog] importExcel rejected")
-        }
+        onRejected: console.log("[FileDialog] importExcel rejected")
     }
 
     // ============================================================
-    // 延迟打开对话框的 Timer（避开 Drawer 关闭动画）
+    // 延迟打开对话框的 Timer
     // ============================================================
     Timer {
         id: filePickerTimer
         interval: 300
         repeat: false
-        onTriggered: filePickerDialog.open()
+        onTriggered: {
+            console.log("[MainMenu] opening custom filePickerDialog")
+            filePickerDialog.open()
+        }
     }
 
     Timer {
@@ -380,9 +399,7 @@ ApplicationWindow {
         property var targetDialog: null
         interval: 350
         repeat: false
-        onTriggered: {
-            if (targetDialog) targetDialog.open()
-        }
+        onTriggered: { if (targetDialog) targetDialog.open() }
     }
 
     // ============================================================
@@ -416,9 +433,7 @@ ApplicationWindow {
         messageDialog.open()
     }
 
-    function showToast(msg) {
-        toast.show(msg)
-    }
+    function showToast(msg) { toast.show(msg) }
 
     function doSave() {
         if (!appWindow.hasQuestion) {
@@ -426,8 +441,23 @@ ApplicationWindow {
             return
         }
         var ok = bridge.saveCurrent()
-        if (!ok) {
-            saveJsonDialog.open()
+        if (!ok) saveJsonDialog.open()
+    }
+
+    function openFilePicker() {
+        console.log("[MainMenu] openFilePicker platform=" + Qt.platform.os)
+        if (appWindow.isAndroidPlatform) {
+            // ★★ Android：使用应用内文件浏览器 ★★
+            if (!bridge.hasStoragePermission()) {
+                permissionDialog.open()
+                return
+            }
+            bridge.ensureWatchDir()
+            filePickerTimer.start()
+        } else {
+            // 桌面：使用系统 FileDialog
+            openFileDialogTimer.targetDialog = openJsonDialog
+            openFileDialogTimer.start()
         }
     }
 
@@ -442,6 +472,7 @@ ApplicationWindow {
             openFileDialogTimer.targetDialog = openJsonDialog
             openFileDialogTimer.start()
         }
+        function onStoragePermissionRequired() { permissionDialog.open() }
     }
 
     // ============================================================
@@ -504,14 +535,7 @@ ApplicationWindow {
                 label: "打开题库"
                 onClicked: {
                     menuDrawer.close()
-                    if (bridge.isAndroid) {
-                        // Android：打开应用内文件浏览器（无 Activity 切换）
-                        filePickerTimer.start()
-                    } else {
-                        // 桌面：使用系统 FileDialog
-                        openFileDialogTimer.targetDialog = openJsonDialog
-                        openFileDialogTimer.start()
-                    }
+                    appWindow.openFilePicker()
                 }
             }
             MenuEntry {
@@ -571,7 +595,7 @@ ApplicationWindow {
             Item { width: 1; height: 12 }
             Text {
                 width: menuColumn.width
-                text: "提示：Android 端仅支持 JSON 题库。"
+                text: "版本 " + appWindow.buildTag + " · " + Qt.platform.os
                 wrapMode: Text.WordWrap
                 font.pixelSize: 11
                 color: "#909399"
@@ -705,12 +729,8 @@ ApplicationWindow {
             question: appWindow.currentQuestion
             memoryEnabled: appWindow.memoryEnabled
 
-            onAnswerSelected: function(letter) {
-                bridge.submitAnswer(letter)
-            }
-            onExplanationEdited: function(text) {
-                bridge.updateExplanation(text)
-            }
+            onAnswerSelected: function(letter) { bridge.submitAnswer(letter) }
+            onExplanationEdited: function(text) { bridge.updateExplanation(text) }
         }
 
         RowLayout {
@@ -799,10 +819,11 @@ ApplicationWindow {
                 color: "#606266"
                 text: {
                     var s = appWindow.viewState
-                    if (!s || !appWindow.hasQuestion) return "准备就绪"
+                    if (!s || !appWindow.hasQuestion) return "准备就绪 · " + appWindow.buildTag
                     var t = "🏆 得分: " + s.score
                           + "   |   📖 模式: " + s.modeDisplay
-                    if (s.memoryEnabled) t += "   |   🧠 记忆模式"
+                    if (s.memoryEnabled) t += "   |   🧠 记忆"
+                    t += "   |   " + appWindow.buildTag
                     return t
                 }
             }
