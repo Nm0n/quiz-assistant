@@ -144,10 +144,7 @@ jobs:
 
       # ============================================================
       # 预克隆 p4a + 初始补丁
-      #   1. python3/hostpython3 recipe 版本改为 3.11.5
-      #   2. PythonActivity.java 提前加载 Qt6Core
-      #   3. 给 python3 recipe 追加 prebuild hook（用 echo 逐行写入，
-      #      避免 heredoc 破坏 YAML 缩进）
+      #   Java 补丁改用 awk 插入标准多行静态块，避免 javac 报 cannot find symbol
       # ============================================================
       - name: Pre-clone p4a and patch
         run: |
@@ -167,15 +164,36 @@ jobs:
             sed -i -E "s|/3\.14\.[0-9]+/Python-3\.14\.[0-9]+\.tar\.xz|/${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz|g" "$RF"
           done
 
-          # ---- 2. PythonActivity.java ----
+          # ---- 2. PythonActivity.java：用 awk 插入标准多行静态块 ----
+          echo "=== 查找所有 PythonActivity.java ==="
           find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r JF; do
-            if ! grep -q "loadQt6CoreFirst" "$JF"; then
-              sed -i '/^public class PythonActivity/a\
-          /* loadQt6CoreFirst */ static { try { String abi = android.os.Build.SUPPORTED_ABIS[0]; System.loadLibrary("Qt6Core_" + abi); } catch (Throwable t) { t.printStackTrace(); } }' "$JF"
+            echo "--- 找到: $JF ---"
+            if grep -q "loadQt6Core" "$JF"; then
+              echo "已打过补丁，跳过"
+              continue
             fi
+            echo "修改前（类声明附近）:"
+            grep -n "^public class PythonActivity" "$JF" || true
+
+            awk '
+            /^public class PythonActivity/ {
+                print;
+                print "    static {";
+                print "        try {";
+                print "            System.loadLibrary(\"Qt6Core_\" + android.os.Build.SUPPORTED_ABIS[0]);";
+                print "        } catch (Throwable ignored) {";
+                print "        }";
+                print "    }";
+                next;
+            }
+            { print }
+            ' "$JF" > "$JF.new" && mv "$JF.new" "$JF"
+
+            echo "修改后（前 30 行）:"
+            head -30 "$JF"
           done
 
-          # ---- 3. python3 recipe prebuild hook（逐行 echo，绝对安全的 YAML）----
+          # ---- 3. python3 recipe prebuild hook（逐行 echo）----
           P3_RECIPE="$P4A/pythonforandroid/recipes/python3/__init__.py"
           if ! grep -q "_p4a_android_prebuild" "$P3_RECIPE"; then
             echo "" >> "$P3_RECIPE"
@@ -198,9 +216,6 @@ jobs:
             echo "        print('[p4a-fix] failed: ' + str(e))" >> "$P3_RECIPE"
             echo "" >> "$P3_RECIPE"
             echo "Python3Recipe.prebuild_arch = _p4a_android_prebuild" >> "$P3_RECIPE"
-            echo "hook 已追加"
-          else
-            echo "hook 已存在，跳过"
           fi
 
       - name: Patch default.spec
@@ -215,8 +230,7 @@ jobs:
           fi
 
       # ============================================================
-      # 后台 patcher：cat > 生成的 shell 脚本，用统一缩进
-      # patcher 内部也用 echo 逐行追加 hook，避免嵌套 heredoc
+      # 后台 patcher：用 awk 插入 Java 静态块（逐行 echo 生成脚本）
       # ============================================================
       - name: Start background patcher
         run: |
@@ -245,9 +259,7 @@ jobs:
           echo '      echo "# ===== Android Python 3.11.5 fix =====" >> "$P3"' >> /tmp/patcher.sh
           echo '      echo "import os as _p4a_os" >> "$P3"' >> /tmp/patcher.sh
           echo '      echo "import subprocess as _p4a_sp" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "" >> "$P3"' >> /tmp/patcher.sh
           echo '      echo "_p4a_orig_prebuild = getattr(Python3Recipe, '"'"'prebuild_arch'"'"', None)" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "" >> "$P3"' >> /tmp/patcher.sh
           echo '      echo "def _p4a_android_prebuild(self, arch):" >> "$P3"' >> /tmp/patcher.sh
           echo '      echo "    if _p4a_orig_prebuild is not None:" >> "$P3"' >> /tmp/patcher.sh
           echo '      echo "        _p4a_orig_prebuild(self, arch)" >> "$P3"' >> /tmp/patcher.sh
@@ -259,13 +271,12 @@ jobs:
           echo '      echo "            print('"'"'[p4a-fix] patched configure: '"'"' + cfg)" >> "$P3"' >> /tmp/patcher.sh
           echo '      echo "    except Exception as e:" >> "$P3"' >> /tmp/patcher.sh
           echo '      echo "        print('"'"'[p4a-fix] failed: '"'"' + str(e))" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "" >> "$P3"' >> /tmp/patcher.sh
           echo '      echo "Python3Recipe.prebuild_arch = _p4a_android_prebuild" >> "$P3"' >> /tmp/patcher.sh
           echo '      echo "$(date) hook $P3" >> $LOG' >> /tmp/patcher.sh
           echo '    fi' >> /tmp/patcher.sh
           echo '    find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r F; do' >> /tmp/patcher.sh
-          echo '      if ! grep -q "loadQt6CoreFirst" "$F"; then' >> /tmp/patcher.sh
-          echo '        sed -i "/^public class PythonActivity/a\\/* loadQt6CoreFirst */ static { try { String abi = android.os.Build.SUPPORTED_ABIS[0]; System.loadLibrary(\\"Qt6Core_\\" + abi); } catch (Throwable t) { t.printStackTrace(); } }" "$F"' >> /tmp/patcher.sh
+          echo '      if ! grep -q "loadQt6Core" "$F"; then' >> /tmp/patcher.sh
+          echo '        awk "/^public class PythonActivity/ { print; print \"    static {\"; print \"        try {\"; print \"            System.loadLibrary(\\\"Qt6Core_\\\" + android.os.Build.SUPPORTED_ABIS[0]);\"; print \"        } catch (Throwable ignored) {\"; print \"        }\"; print \"    }\"; next; } { print }" "$F" > "$F.new" && mv "$F.new" "$F"' >> /tmp/patcher.sh
           echo '        echo "$(date) activity $F" >> $LOG' >> /tmp/patcher.sh
           echo '      fi' >> /tmp/patcher.sh
           echo '    done' >> /tmp/patcher.sh
@@ -329,29 +340,35 @@ jobs:
           grep -n '\[ERROR\]' "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "无 [ERROR]"
 
           echo ""
-          echo "=== 3. 真正的编译错误（过滤 -Werror 干扰）==="
+          echo "=== 3. 编译错误（过滤 -Werror 干扰）==="
           grep -nE ': error: |make(\[[0-9]+\])?: \*\*\*' "$GITHUB_WORKSPACE/build.log" | grep -v "implicit-function-declaration" | tail -20 || echo "无"
 
           echo ""
-          echo "=== 4. grpmodule.c 是否还报错 ==="
-          grep -n "grpmodule.c" "$GITHUB_WORKSPACE/build.log" | tail -5 || echo "grpmodule.c 无报错（说明补丁生效）"
+          echo "=== 4. Java 编译错误 cannot find symbol 完整上下文 ==="
+          grep -B 2 -A 10 "cannot find symbol" "$GITHUB_WORKSPACE/build.log" | head -80 || echo "无 cannot find symbol"
 
           echo ""
-          echo "=== 5. gradle 失败位置 ==="
-          grep -n "gradlew failed" "$GITHUB_WORKSPACE/build.log" | head -3 || echo "无 gradle 失败"
-
-          echo ""
-          echo "=== 6. gradle 之前 80 行 ==="
-          FAIL_LINE=$(grep -n "gradlew failed" "$GITHUB_WORKSPACE/build.log" | head -1 | cut -d: -f1)
-          if [ -n "$FAIL_LINE" ]; then
-            START=$((FAIL_LINE - 80))
-            [ "$START" -lt 1 ] && START=1
-            sed -n "${START},${FAIL_LINE}p" "$GITHUB_WORKSPACE/build.log"
+          echo "=== 5. 实际 PythonActivity.java 内容（行 1~40）==="
+          JAVA_FILE=$(find /home/runner/work/quiz-assistant/quiz-assistant/.buildozer/android/platform/build-arm64-v8a -name "PythonActivity.java" 2>/dev/null | head -1)
+          if [ -n "$JAVA_FILE" ]; then
+            echo "文件: $JAVA_FILE"
+            sed -n '1,40p' "$JAVA_FILE"
+          else
+            echo "未找到 PythonActivity.java"
           fi
 
           echo ""
-          echo "=== 7. Traceback ==="
-          grep -nE 'Traceback|RuntimeError|CalledProcessError' "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "无"
+          echo "=== 6. gradle 失败位置 ==="
+          grep -n "gradlew failed" "$GITHUB_WORKSPACE/build.log" | head -3 || echo "无"
+
+          echo ""
+          echo "=== 7. gradle 之前 40 行 ==="
+          FAIL_LINE=$(grep -n "gradlew failed" "$GITHUB_WORKSPACE/build.log" | head -1 | cut -d: -f1)
+          if [ -n "$FAIL_LINE" ]; then
+            START=$((FAIL_LINE - 40))
+            [ "$START" -lt 1 ] && START=1
+            sed -n "${START},${FAIL_LINE}p" "$GITHUB_WORKSPACE/build.log"
+          fi
 
       - name: Collect APK
         if: always()
