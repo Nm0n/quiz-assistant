@@ -2,10 +2,9 @@
 # 移动端 / 跨平台入口：加载 QML，注册桥接对象，启动应用。
 #
 # 文件加载策略：
-#   - Android：应用内文件浏览器，扫描应用专属外部目录，完全避免 Activity 切换
-#   - 桌面：走 QML FileDialog（原有逻辑）
-#
-# 兼容 core/ 前提：IO 方法接受 str 路径或 file-like 对象。
+#   - Android：应用内文件浏览器，扫描 /storage/emulated/0/Download/quizassistant/
+#              需要 MANAGE_EXTERNAL_STORAGE 权限（首次使用引导用户开启）
+#   - 桌面：走 QML FileDialog
 
 import io
 import os
@@ -22,9 +21,10 @@ from core.mode_constants import MODE_ALL, MODE_WRONG, MODE_FAVORITE, MODE_DISPLA
 from core.utils import map_judgment
 
 
-# 使用 Basic style：允许 Button / ProgressBar 等完全自定义样式，
-# 消除 Windows 原生 style 下的 "does not support customization" 警告。
 QQuickStyle.setStyle("Basic")
+
+# 公共扫描目录（Android）
+ANDROID_WATCH_DIR = "/storage/emulated/0/Download/quizassistant"
 
 
 class ControllerBridge(QObject):
@@ -33,8 +33,9 @@ class ControllerBridge(QObject):
     viewStateChanged = Signal()
     infoMessage = Signal(str)
     errorOccurred = Signal(str)
-    # 桌面端请求 QML 打开 FileDialog
     qmlFileDialogRequested = Signal()
+    # 请求 QML 显示"需要存储权限"引导对话框
+    storagePermissionRequired = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -48,43 +49,69 @@ class ControllerBridge(QObject):
         return sys.platform == "android"
 
     # ==============================================================
-    # 应用专属 JSON 文件目录（方案一核心）
+    # 存储权限（Android 11+ MANAGE_EXTERNAL_STORAGE）
+    # ==============================================================
+    @Slot(result=bool)
+    def hasStoragePermission(self):
+        if sys.platform != "android":
+            return True
+        try:
+            from jnius import autoclass
+            Environment = autoclass("android.os.Environment")
+            return bool(Environment.isExternalStorageManager())
+        except Exception as e:
+            print("[hasStoragePermission] failed: {}".format(e))
+            return False
+
+    @Slot()
+    def openStoragePermissionSettings(self):
+        """跳转到本应用的「所有文件访问」权限设置页"""
+        if sys.platform != "android":
+            return
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            Intent = autoclass("android.content.Intent")
+            Settings = autoclass("android.provider.Settings")
+            Uri = autoclass("android.net.Uri")
+
+            activity = PythonActivity.mActivity
+            package_name = activity.getPackageName()
+
+            intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+            intent.setData(Uri.parse("package:" + package_name))
+            activity.startActivity(intent)
+            print("[openStoragePermissionSettings] launched for " + package_name)
+        except Exception as e:
+            print("[openStoragePermissionSettings] failed: {}".format(e))
+            self.errorOccurred.emit(
+                "无法打开权限设置页，请手动前往：\n"
+                "系统设置 → 应用 → 智能刷题助手 → 权限 → 所有文件访问"
+            )
+
+    @Slot(result=bool)
+    def ensureWatchDir(self):
+        """确保扫描目录存在，返回是否成功"""
+        try:
+            target = self._get_watch_dir()
+            if not os.path.exists(target):
+                os.makedirs(target, exist_ok=True)
+            return os.path.isdir(target)
+        except Exception as e:
+            print("[ensureWatchDir] failed: {}".format(e))
+            return False
+
+    # ==============================================================
+    # 应用专属 JSON 文件目录
     # ==============================================================
     @staticmethod
     def _get_watch_dir():
         """
-        返回应用专属的 JSON 文件存放目录。
-        Android: /sdcard/Android/data/<pkg>/files/
+        Android: /storage/emulated/0/Download/quizassistant/
         桌面:   <项目根>/data/
         """
         if sys.platform == "android":
-            # 首选：应用专属外部存储（用户可通过 USB 或系统「文件」应用访问）
-            try:
-                from jnius import autoclass
-                PythonActivity = autoclass("org.kivy.android.PythonActivity")
-                activity = PythonActivity.mActivity
-                ext_dir = activity.getExternalFilesDir(None)
-                if ext_dir is not None:
-                    path = ext_dir.getAbsolutePath()
-                    if not os.path.exists(path):
-                        os.makedirs(path, exist_ok=True)
-                    return path
-            except Exception as e:
-                print("[_get_watch_dir] getExternalFilesDir failed: {}".format(e))
-
-            # 兜底：应用内部 files 目录（普通用户无法访问，仅作最后手段）
-            try:
-                from jnius import autoclass
-                PythonActivity = autoclass("org.kivy.android.PythonActivity")
-                activity = PythonActivity.mActivity
-                files_dir = activity.getFilesDir().getAbsolutePath()
-                if not os.path.exists(files_dir):
-                    os.makedirs(files_dir, exist_ok=True)
-                return files_dir
-            except Exception as e:
-                print("[_get_watch_dir] getFilesDir failed: {}".format(e))
-
-            return "/tmp"
+            return ANDROID_WATCH_DIR
         else:
             base = os.path.dirname(os.path.abspath(__file__))
             path = os.path.join(base, "data")
@@ -93,7 +120,6 @@ class ControllerBridge(QObject):
 
     @Slot(result=str)
     def getWatchDir(self):
-        """返回扫描目录路径（供 QML 显示）"""
         return self._get_watch_dir()
 
     @Slot(result="QVariantList")
@@ -103,6 +129,7 @@ class ControllerBridge(QObject):
         result = []
         try:
             if not os.path.isdir(watch_dir):
+                print("[listJsonFiles] dir not exist: {}".format(watch_dir))
                 return result
             for name in sorted(os.listdir(watch_dir)):
                 if not name.lower().endswith(".json"):
@@ -127,12 +154,10 @@ class ControllerBridge(QObject):
 
     @Slot(str, result=int)
     def loadJsonFile(self, path):
-        """从本地路径直接加载 JSON（不经过任何 Activity 切换）"""
         return self.loadFromJson(path)
 
     @Slot(str)
     def copyToClipboard(self, text):
-        """把文本复制到剪贴板（用于复制目录路径）"""
         try:
             cb = QGuiApplication.clipboard()
             if cb is not None:
@@ -142,7 +167,7 @@ class ControllerBridge(QObject):
             print("[copyToClipboard] failed: {}".format(e))
 
     # ==============================================================
-    # 路径 / URI 适配（桌面端及另存为使用）
+    # 路径 / URI 适配
     # ==============================================================
     @staticmethod
     def _resolve_read(raw):
@@ -224,9 +249,6 @@ class ControllerBridge(QObject):
         finally:
             qf.close()
 
-    # ==============================================================
-    # Android ContentResolver 辅助（仅用于 content:// 场景）
-    # ==============================================================
     @staticmethod
     def _read_android_uri(uri_str):
         from jnius import autoclass
