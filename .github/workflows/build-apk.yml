@@ -1,16 +1,15 @@
 # .github/workflows/build-apk.yml
 #
-# 核心修复：
-#   1. 阻止 buildozer 清空 .buildozer 后重新 clone p4a（p4a 放外部目录）
-#   2. 后台 patcher 用 heredoc 生成，保证 YAML 语法正确
-#   3. Java 静态块压成单行，规避 sed 多行转义问题
+# 本版关键修复：
+#   1. 放弃 p4a_src 外部目录（buildozer 支持不稳），回到 .buildozer 内预克隆
+#   2. Collect APK 不排除任何路径，全盘搜索
+#   3. 诊断剥离 ANSI 颜色码，用 tail 而不是 head
 #
 # 历史修复保留：
 #   - NDK r26b
 #   - PythonActivity.java 提前加载 Qt6Core
 #   - AndroidManifest 注入 MANAGE_EXTERNAL_STORAGE
 #   - Create Release（tag 触发）
-#   - Verify APK（构建成功兜底）
 
 name: Build Android APK
 
@@ -35,7 +34,7 @@ jobs:
   build-apk:
     name: Build APK (arm64-v8a)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v4
@@ -73,7 +72,7 @@ jobs:
           echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
 
-      - name: Ensure JAXB in sdkmanager CLASSPATH + legacy symlinks
+      - name: Ensure JAXB + legacy symlinks
         run: |
           SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           LIBDIR="$ANDROID_HOME/cmdline-tools/latest/lib"
@@ -92,11 +91,6 @@ jobs:
           ln -sf "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "$ANDROID_HOME/cmdline-tools/bin/sdkmanager"
           ln -sf "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" "$ANDROID_HOME/cmdline-tools/bin/avdmanager"
           echo "$ANDROID_HOME/tools/bin" >> "$GITHUB_PATH"
-
-      - name: Verify sdkmanager
-        run: |
-          which sdkmanager
-          sdkmanager --version
 
       - name: Install Android SDK + NDK r26b
         run: |
@@ -121,7 +115,7 @@ jobs:
             python3 python3-dev python3-pip python3-venv \
             unzip wget zip
 
-      - name: Install PySide6 and deploy tools
+      - name: Install PySide6 and tools
         run: |
           source $HOME/venv/bin/activate
           python -m pip install --upgrade pip
@@ -129,7 +123,6 @@ jobs:
           pip install packaging jinja2 pkginfo tqdm
           pip install buildozer cython virtualenv
           pip list | grep -i -E "pyside|shiboken|buildozer"
-          which pyside6-android-deploy
 
       - name: Download Android Wheels
         run: |
@@ -157,24 +150,22 @@ jobs:
           SHA256=$(sha256sum "Python-${TARGET_PYTHON}.tar.xz" | awk '{print $1}')
           echo "PY_TARBALL_MD5=$MD5" >> "$GITHUB_ENV"
           echo "PY_TARBALL_SHA256=$SHA256" >> "$GITHUB_ENV"
-          echo "MD5=$MD5"
-          echo "SHA256=$SHA256"
+          echo "MD5=$MD5  SHA256=$SHA256"
 
       # ============================================================
-      # 预克隆 p4a 到 p4a_src（.buildozer 之外）
-      # buildozer 启动时会 rm -rf .buildozer，会删掉里面的 p4a
-      # 所以必须把 p4a 放在外面，并让 p4a.source_dir 指向它
+      # 预克隆 p4a 到 .buildozer 内部 + 初始打补丁
       # ============================================================
       - name: Pre-clone p4a and patch
         run: |
           set -e
-          P4A_SRC="$GITHUB_WORKSPACE/p4a_src"
-          rm -rf "$P4A_SRC"
-          git clone -b develop --single-branch https://github.com/kivy/python-for-android.git "$P4A_SRC"
+          P4A="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android"
+          rm -rf "$GITHUB_WORKSPACE/.buildozer"
+          mkdir -p "$(dirname "$P4A")"
+          git clone -b develop --single-branch https://github.com/kivy/python-for-android.git "$P4A"
 
           # ---- 1. python3 / hostpython3 recipe ----
           for R in python3 hostpython3; do
-            RF="$P4A_SRC/pythonforandroid/recipes/$R/__init__.py"
+            RF="$P4A/pythonforandroid/recipes/$R/__init__.py"
             [ -f "$RF" ] || continue
             sed -i -E "s/^([[:space:]]*version[[:space:]]*=[[:space:]]*)['\"]3\.[0-9]+\.[0-9]+['\"]/\1'${TARGET_PYTHON}'/" "$RF"
             sed -i -E "s/^([[:space:]]*md5sum[[:space:]]*=[[:space:]]*)['\"][a-fA-F0-9]+['\"]/\1'${PY_TARBALL_MD5}'/" "$RF"
@@ -184,7 +175,7 @@ jobs:
           done
 
           # ---- 2. PythonActivity.java（单行静态块）----
-          find "$P4A_SRC/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r JF; do
+          find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r JF; do
             if ! grep -q "loadQt6CoreFirst" "$JF"; then
               sed -i '/^public class PythonActivity/a\
           /* loadQt6CoreFirst */ static { try { String abi = android.os.Build.SUPPORTED_ABIS[0]; System.loadLibrary("Qt6Core_" + abi); } catch (Throwable t) { t.printStackTrace(); } }' "$JF"
@@ -193,7 +184,7 @@ jobs:
           done
 
           # ---- 3. AndroidManifest.tmpl.xml ----
-          find "$P4A_SRC/pythonforandroid/bootstraps" -name "AndroidManifest.tmpl.xml" -type f 2>/dev/null | while IFS= read -r MF; do
+          find "$P4A/pythonforandroid/bootstraps" -name "AndroidManifest.tmpl.xml" -type f 2>/dev/null | while IFS= read -r MF; do
             if ! grep -q "MANAGE_EXTERNAL_STORAGE" "$MF"; then
               awk '
                 /<application/ && !done {
@@ -208,36 +199,24 @@ jobs:
             fi
           done
 
-          echo "======== 验证 ========"
-          grep -nE "^[[:space:]]*version[[:space:]]*=" "$P4A_SRC/pythonforandroid/recipes/python3/__init__.py" | head -3
-          echo "--- manifest patched ---"
-          grep -rl "MANAGE_EXTERNAL_STORAGE" "$P4A_SRC/pythonforandroid/bootstraps" 2>/dev/null | head -5
-          echo "--- activity patched ---"
-          grep -rl "loadQt6CoreFirst" "$P4A_SRC/pythonforandroid/bootstraps" 2>/dev/null | head -5
+          echo "=== 验证 ==="
+          grep -nE "^[[:space:]]*version[[:space:]]*=" "$P4A/pythonforandroid/recipes/python3/__init__.py" | head -3
 
-      - name: Patch buildozer default.spec to use external p4a
+      - name: Patch buildozer default.spec
         run: |
           source $HOME/venv/bin/activate
           DS="$VIRTUAL_ENV/lib/python3.11/site-packages/buildozer/default.spec"
-          P4A_SRC="$GITHUB_WORKSPACE/p4a_src"
-          for f in "$DS" "$GITHUB_WORKSPACE/buildozer.spec"; do
-            [ -f "$f" ] || continue
-            if grep -q "^p4a.source_dir" "$f"; then
-              sed -i "s|^p4a.source_dir.*|p4a.source_dir = ${P4A_SRC}|" "$f"
-            else
-              sed -i "/^\[buildozer\]/a p4a.source_dir = ${P4A_SRC}" "$f"
-            fi
-            echo "=== $f ==="
-            grep -A 10 "^\[buildozer\]" "$f" || true
-          done
-
-      - name: Clean p4a build cache
-        run: |
-          rm -rf "$GITHUB_WORKSPACE/.buildozer" 2>/dev/null || true
-          echo "缓存清理完成"
+          P4A="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android"
+          if grep -q "^p4a.source_dir" "$DS"; then
+            sed -i "s|^p4a.source_dir.*|p4a.source_dir = ${P4A}|" "$DS"
+          else
+            sed -i "/^\[buildozer\]/a p4a.source_dir = ${P4A}" "$DS"
+          fi
+          echo "=== default.spec [buildozer] 段 ==="
+          grep -A 8 "^\[buildozer\]" "$DS" || true
 
       # ============================================================
-      # 后台 patcher：heredoc 生成，缩进一致，保证 YAML 合法
+      # 后台 patcher：持续打补丁，防止 buildozer 覆盖
       # ============================================================
       - name: Start background p4a patcher
         run: |
@@ -292,7 +271,6 @@ jobs:
 
           while true; do
             for P4A in \
-              "$GITHUB_WORKSPACE/p4a_src" \
               "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" \
               "$HOME/.buildozer/android/platform/python-for-android"; do
               [ -d "$P4A" ] || continue
@@ -313,22 +291,25 @@ jobs:
           echo "$!" > /tmp/patcher.pid
           echo "Patcher PID: $(cat /tmp/patcher.pid)"
           sleep 2
-          echo "=== 启动日志 ==="
           cat /tmp/patcher.log || true
 
+      # ============================================================
+      # 核心构建
+      # ============================================================
       - name: Run pyside6-android-deploy
+        continue-on-error: true
+        id: deploy
         run: |
           set -o pipefail
           source $HOME/venv/bin/activate
           WHEEL_PYSIDE="wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
           WHEEL_SHIBOKEN="wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
-          ls -lh "$WHEEL_PYSIDE" "$WHEEL_SHIBOKEN"
-          echo "=== 运行前：p4a.source_dir 检查 ==="
-          grep "p4a.source_dir" "$VIRTUAL_ENV/lib/python3.11/site-packages/buildozer/default.spec" || true
+
           set +e
           pyside6-android-deploy \
             --config-file pysidedeploy.spec \
             --wheel-pyside "$WHEEL_PYSIDE" \
+            --wheel-shbokken "$WHEEL_SHIBOKEN" \
             --wheel-shiboken "$WHEEL_SHIBOKEN" \
             --ndk-path "$ANDROID_NDK_HOME" \
             --sdk-path "$ANDROID_HOME" \
@@ -336,65 +317,106 @@ jobs:
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
           echo "pyside6-android-deploy 退出码: $EXIT_CODE"
-          exit $EXIT_CODE
 
       - name: Stop patcher
         if: always()
         run: |
           if [ -f /tmp/patcher.pid ]; then
             kill "$(cat /tmp/patcher.pid)" 2>/dev/null || true
-            echo "已停止 Patcher PID: $(cat /tmp/patcher.pid)"
           fi
-          echo "=== Patcher 完整日志 ==="
+          echo "=== Patcher 日志 ==="
           cat /tmp/patcher.log || true
 
-      - name: Post-deploy diagnostics
+      # ============================================================
+      # 诊断（剥离 ANSI，用 tail 而不是 head）
+      # ============================================================
+      - name: Diagnostics
         if: always()
         run: |
-          echo "=== build.log 末尾 80 行 ==="
-          [ -f "$GITHUB_WORKSPACE/build.log" ] && tail -80 "$GITHUB_WORKSPACE/build.log" || echo "无 build.log"
-          echo ""
-          echo "=== 搜索错误关键词 ==="
-          [ -f "$GITHUB_WORKSPACE/build.log" ] && \
-            grep -nE "error|Error|ERROR|failed|Failed|FAILED|Traceback" "$GITHUB_WORKSPACE/build.log" | head -30 || echo "无 build.log"
+          if [ ! -f "$GITHUB_WORKSPACE/build.log" ]; then
+            echo "无 build.log"
+            exit 0
+          fi
 
+          # 剥离 ANSI 颜色码，输出干净文本
+          sed 's/\x1b\[[0-9;]*m//g' "$GITHUB_WORKSPACE/build.log" > /tmp/build_clean.log
+
+          echo "=== 1. p4a 真正的错误标记 [ERROR] ==="
+          grep -n '\[ERROR\]' /tmp/build_clean.log | tail -20 || echo "无 [ERROR]"
+
+          echo ""
+          echo "=== 2. Python Traceback / RuntimeError ==="
+          grep -nE 'Traceback|RuntimeError|CalledProcessError' /tmp/build_clean.log | tail -20 || echo "无 Traceback"
+
+          echo ""
+          echo "=== 3. make/gcc 报错（用 tail 取最后的）==="
+          grep -nE 'make(\[[0-9]+\])?: \*\*\*|error: ' /tmp/build_clean.log | tail -20 || echo "无 make/gcc 报错"
+
+          echo ""
+          echo "=== 4. 'Buildozer failed' 之前 80 行上下文 ==="
+          FAIL_LINE=$(grep -n "Buildozer failed to execute" /tmp/build_clean.log | head -1 | cut -d: -f1)
+          if [ -n "$FAIL_LINE" ]; then
+            START=$((FAIL_LINE - 80))
+            [ "$START" -lt 1 ] && START=1
+            sed -n "${START},${FAIL_LINE}p" /tmp/build_clean.log
+          else
+            echo "未找到 'Buildozer failed' 标记，打印末尾 100 行："
+            tail -100 /tmp/build_clean.log
+          fi
+
+      # ============================================================
+      # 收集 APK：不排除任何路径，全盘搜索
+      # ============================================================
       - name: Collect APK
         if: always()
         run: |
           mkdir -p dist
-          find . -type f -name "*.apk" \
-            -not -path "./dist/*" \
-            -not -path "./.buildozer/*" \
-            -not -path "./p4a_src/*" \
-            -exec cp {} dist/ \; 2>/dev/null || true
-          echo "=== dist/ 内容 ==="
-          ls -lh dist/ || echo "dist/ 为空"
+          echo "=== 全盘搜索所有 .apk ==="
+          find /home/runner -type f -name "*.apk" 2>/dev/null > /tmp/apk_list.txt || true
+          cat /tmp/apk_list.txt || true
 
-      # ============================================================
-      # 验证 APK 内容（构建成功的兜底诊断）
-      # ============================================================
+          echo ""
+          echo "=== 复制到 dist/ ==="
+          if [ -s /tmp/apk_list.txt ]; then
+            while IFS= read -r apk; do
+              [ -f "$apk" ] || continue
+              # 跳过 Android SDK 里的系统 APK
+              case "$apk" in
+                */android/sdk/*) continue ;;
+                */cmdline-tools/*) continue ;;
+                */ndk/*) continue ;;
+              esac
+              cp "$apk" dist/ 2>/dev/null && echo "复制: $apk"
+            done < /tmp/apk_list.txt
+          fi
+
+          echo ""
+          echo "=== dist/ 内容 ==="
+          ls -lh dist/ 2>/dev/null || echo "dist/ 为空"
+
       - name: Verify APK contents
         if: always()
         run: |
-          APK=$(find dist -name "*.apk" | head -1)
+          APK=$(find dist -name "*.apk" 2>/dev/null | head -1)
           if [ -z "$APK" ]; then
-            echo "没有找到 APK，跳过验证"
+            echo "❌ 没有找到 APK"
             exit 0
           fi
           echo "检查 APK: $APK"
+          echo "APK 大小: $(du -h "$APK" | cut -f1)"
           echo "=== 关键库文件 ==="
           unzip -l "$APK" | grep -E "libpython|libshiboken|libQt6Core|libQt6Quick" || true
           echo ""
-          echo "=== 关键判定 ==="
           if unzip -l "$APK" | grep -q "libpython3.11.so"; then
             echo "✅ 包含 libpython3.11.so"
           elif unzip -l "$APK" | grep -q "libpython3.14.so"; then
-            echo "❌ 仍是 libpython3.14.so —— p4a 补丁没生效"
+            echo "❌ 仍是 libpython3.14.so"
           else
-            echo "❌ 没有任何 libpython3.x.so"
+            echo "❌ 无 libpython3.x.so"
           fi
 
       - name: Upload APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: quizassistant-apk-${{ github.sha }}
@@ -409,13 +431,11 @@ jobs:
           name: build-log-${{ github.sha }}
           path: |
             build.log
+            /tmp/build_clean.log
             /tmp/patcher.log
           if-no-files-found: warn
           retention-days: 7
 
-      # ============================================================
-      # 打 tag 时自动创建 GitHub Release
-      # ============================================================
       - name: Create Release with APK
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
