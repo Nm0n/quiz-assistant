@@ -144,9 +144,7 @@ jobs:
 
       # ============================================================
       # 预克隆 p4a + 初始补丁
-      #   1. recipe 版本
-      #   2. PythonActivity.java：静态块 + onCreate 里调用 setActivity（带日志）
-      #   3. python3 recipe prebuild hook
+      # Java 补丁回到 V2 简单版：静态块 + 单层反射 setActivity
       # ============================================================
       - name: Pre-clone p4a and patch
         run: |
@@ -166,13 +164,10 @@ jobs:
             sed -i -E "s|/3\.14\.[0-9]+/Python-3\.14\.[0-9]+\.tar\.xz|/${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz|g" "$RF"
           done
 
-          # ---- 2. PythonActivity.java 补丁 ----
-          #   a) 类声明后插入静态块加载 Qt6Core（缓存 JavaVM）
-          #   b) onCreate 里：直接调用 + 反射兜底 + 日志
+          # ---- 2. PythonActivity.java 补丁（简单版）----
           echo "===== 查找 PythonActivity.java ====="
           find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null > /tmp/java_files.txt || true
           cat /tmp/java_files.txt
-          echo "===================================="
 
           while IFS= read -r JF; do
             [ -n "$JF" ] || continue
@@ -197,33 +192,21 @@ jobs:
                 print;
                 print "        /* _p4a_activity_patched */";
                 print "        try {";
-                print "            Class<?> _qn = Class.forName(\"org.qtproject.qt.android.QtNative\");";
-                print "            try {";
-                print "                java.lang.reflect.Method _m = _qn.getDeclaredMethod(\"setActivity\", android.app.Activity.class);";
-                print "                _m.setAccessible(true);";
-                print "                _m.invoke(null, this);";
-                print "                android.util.Log.d(\"p4a-activity\", \"setActivity ok (declared)\");";
-                print "            } catch (Throwable _t1) {";
-                print "                android.util.Log.d(\"p4a-activity\", \"declared failed: \" + _t1);";
-                print "                try {";
-                print "                    java.lang.reflect.Method _m2 = _qn.getMethod(\"setActivity\", android.app.Activity.class);";
-                print "                    _m2.invoke(null, this);";
-                print "                    android.util.Log.d(\"p4a-activity\", \"setActivity ok (public)\");";
-                print "                } catch (Throwable _t2) {";
-                print "                    android.util.Log.d(\"p4a-activity\", \"public failed: \" + _t2);";
-                print "                }";
-                print "            }";
-                print "        } catch (Throwable _t0) {";
-                print "            android.util.Log.d(\"p4a-activity\", \"class load failed: \" + _t0);";
-                print "        }";
+                print "            Class<?> _qtNative = Class.forName(\"org.qtproject.qt.android.QtNative\");";
+                print "            java.lang.reflect.Method _setAct = _qtNative.getDeclaredMethod(\"setActivity\", android.app.Activity.class);";
+                print "            _setAct.setAccessible(true);";
+                print "            _setAct.invoke(null, this);";
+                print "        } catch (Throwable ignored) {}";
                 next;
             }
             { print }
             ' "$JF" > "$JF.new" && mv "$JF.new" "$JF"
 
-            echo "--- 修改后前 60 行 ---"
-            head -60 "$JF"
-            echo "===================================="
+            echo "--- 修改后前 40 行 ---"
+            head -40 "$JF"
+            echo "=== 大括号计数 ==="
+            echo "  open:  $(grep -o '{' "$JF" | wc -l)"
+            echo "  close: $(grep -o '}' "$JF" | wc -l)"
           done < /tmp/java_files.txt
 
           # ---- 3. python3 recipe prebuild hook ----
@@ -260,7 +243,7 @@ jobs:
           fi
 
       # ============================================================
-      # 后台 patcher（简化：只保护 recipe 版本、hook、PythonActivity）
+      # 后台 patcher
       # ============================================================
       - name: Start background patcher
         run: |
@@ -278,8 +261,6 @@ jobs:
           echo '      F="$P4A/pythonforandroid/recipes/$R/__init__.py"' >> /tmp/patcher.sh
           echo '      if [ -f "$F" ] && grep -qE "version = .3\.14\." "$F"; then' >> /tmp/patcher.sh
           echo '        sed -i -E "s/version = .3\.[0-9]+\.[0-9]+./version = \"$TARGET_PY\"/" "$F"' >> /tmp/patcher.sh
-          echo '        [ -n "$MD5" ] && sed -i -E "s/md5sum = .[a-fA-F0-9]+./md5sum = \"$MD5\"/" "$F"' >> /tmp/patcher.sh
-          echo '        [ -n "$SHA256" ] && sed -i -E "s/sha256 = .[a-fA-F0-9]+./sha256 = \"$SHA256\"/" "$F"' >> /tmp/patcher.sh
           echo '      fi' >> /tmp/patcher.sh
           echo '    done' >> /tmp/patcher.sh
           echo '    P3="$P4A/pythonforandroid/recipes/python3/__init__.py"' >> /tmp/patcher.sh
@@ -300,7 +281,7 @@ jobs:
           echo '    fi' >> /tmp/patcher.sh
           echo '    find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r F; do' >> /tmp/patcher.sh
           echo '      if ! grep -q "_p4a_activity_patched" "$F"; then' >> /tmp/patcher.sh
-          echo '        awk "/^public class PythonActivity/ { print; print \"    /* _p4a_activity_patched */\"; print \"    static {\"; print \"        try {\"; print \"            System.loadLibrary(\\\"Qt6Core_\\\" + android.os.Build.SUPPORTED_ABIS[0]);\"; print \"        } catch (Throwable ignored) {}\"; print \"    }\"; next; } /onCreate\\(Bundle/ { print; print \"        /* _p4a_activity_patched */\"; print \"        try {\"; print \"            Class<?> _qn = Class.forName(\\\"org.qtproject.qt.android.QtNative\\\");\"; print \"            java.lang.reflect.Method _m = _qn.getDeclaredMethod(\\\"setActivity\\\", android.app.Activity.class);\"; print \"            _m.setAccessible(true);\"; print \"            _m.invoke(null, this);\"; print \"            android.util.Log.d(\\\"p4a-activity\\\", \\\"setActivity ok\\\");\"; print \"        } catch (Throwable _t) { android.util.Log.d(\\\"p4a-activity\\\", \\\"failed: \\\" + _t); }\"; next; } { print }" "$F" > "$F.new" && mv "$F.new" "$F"' >> /tmp/patcher.sh
+          echo '        awk "/^public class PythonActivity/ { print; print \"    /* _p4a_activity_patched */\"; print \"    static {\"; print \"        try {\"; print \"            System.loadLibrary(\\\"Qt6Core_\\\" + android.os.Build.SUPPORTED_ABIS[0]);\"; print \"        } catch (Throwable ignored) {}\"; print \"    }\"; next; } /onCreate\\(Bundle/ { print; print \"        /* _p4a_activity_patched */\"; print \"        try {\"; print \"            Class<?> _qtNative = Class.forName(\\\"org.qtproject.qt.android.QtNative\\\");\"; print \"            java.lang.reflect.Method _setAct = _qtNative.getDeclaredMethod(\\\"setActivity\\\", android.app.Activity.class);\"; print \"            _setAct.setAccessible(true);\"; print \"            _setAct.invoke(null, this);\"; print \"        } catch (Throwable ignored) {}\"; next; } { print }" "$F" > "$F.new" && mv "$F.new" "$F"' >> /tmp/patcher.sh
           echo '      fi' >> /tmp/patcher.sh
           echo '    done' >> /tmp/patcher.sh
           echo '  done' >> /tmp/patcher.sh
@@ -350,15 +331,23 @@ jobs:
 
           echo ""
           echo "=== 2. Java 编译错误 ==="
-          grep -nE 'error: |cannot find symbol|符号' "$GITHUB_WORKSPACE/build.log" | grep -v "grpmodule" | grep -v "implicit-function-declaration" | tail -20 || echo "无 Java 错误"
+          grep -nE 'error: |cannot find symbol' "$GITHUB_WORKSPACE/build.log" | grep -v "grpmodule" | grep -v "implicit-function-declaration" | tail -20 || echo "无"
 
           echo ""
-          echo "=== 3. p4a 错误标记 ==="
+          echo "=== 3. p4a [ERROR] ==="
           grep -n '\[ERROR\]' "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "无"
 
           echo ""
-          echo "=== 4. build.log 末尾 60 行 ==="
-          tail -60 "$GITHUB_WORKSPACE/build.log"
+          echo "=== 4. Buildozer failed 之前 200 行 ==="
+          FAIL_LINE=$(grep -n "Buildozer failed to execute" "$GITHUB_WORKSPACE/build.log" | head -1 | cut -d: -f1)
+          if [ -n "$FAIL_LINE" ]; then
+            START=$((FAIL_LINE - 200))
+            [ "$START" -lt 1 ] && START=1
+            sed -n "${START},${FAIL_LINE}p" "$GITHUB_WORKSPACE/build.log"
+          else
+            echo "未找到 Buildozer failed 标记，打印末尾 200 行："
+            tail -200 "$GITHUB_WORKSPACE/build.log"
+          fi
 
       - name: Collect APK
         if: always()
