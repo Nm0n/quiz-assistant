@@ -88,7 +88,7 @@ jobs:
           yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
           test -d "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" || (echo "NDK 安装失败" && exit 1)
 
-      - name: Export environment variables (覆盖 runner 预装 NDK)
+      - name: Export env vars (覆盖 runner 预装 NDK)
         run: |
           NDK="$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}"
           echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
@@ -144,12 +144,10 @@ jobs:
 
       # ============================================================
       # 预克隆 p4a + 初始补丁
-      # 补丁内容：
-      #   1. python3/hostpython3 recipe 的 version 改为 3.11.5
-      #   2. PythonActivity.java 提前加载 Qt6Core（解决 SIGSEGV）
-      #   3. ★ 给 python3 recipe 追加 prebuild_arch hook
-      #      该 hook 会在 Python 源码解压后，sed 掉 configure 中的
-      #      -Werror=implicit-function-declaration，解决 grpmodule.c 编译失败
+      #   1. python3/hostpython3 recipe 版本改为 3.11.5
+      #   2. PythonActivity.java 提前加载 Qt6Core
+      #   3. 给 python3 recipe 追加 prebuild hook（用 echo 逐行写入，
+      #      避免 heredoc 破坏 YAML 缩进）
       # ============================================================
       - name: Pre-clone p4a and patch
         run: |
@@ -159,7 +157,7 @@ jobs:
           mkdir -p "$(dirname "$P4A")"
           git clone -b develop --single-branch https://github.com/kivy/python-for-android.git "$P4A"
 
-          # ---- 1. python3 / hostpython3 recipe 版本补丁 ----
+          # ---- 1. recipe 版本 ----
           for R in python3 hostpython3; do
             RF="$P4A/pythonforandroid/recipes/$R/__init__.py"
             [ -f "$RF" ] || continue
@@ -169,7 +167,7 @@ jobs:
             sed -i -E "s|/3\.14\.[0-9]+/Python-3\.14\.[0-9]+\.tar\.xz|/${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz|g" "$RF"
           done
 
-          # ---- 2. PythonActivity.java 提前加载 Qt6Core ----
+          # ---- 2. PythonActivity.java ----
           find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r JF; do
             if ! grep -q "loadQt6CoreFirst" "$JF"; then
               sed -i '/^public class PythonActivity/a\
@@ -177,43 +175,35 @@ jobs:
             fi
           done
 
-          # ---- 3. ★ 关键修复：给 python3 recipe 追加 prebuild hook ----
+          # ---- 3. python3 recipe prebuild hook（逐行 echo，绝对安全的 YAML）----
           P3_RECIPE="$P4A/pythonforandroid/recipes/python3/__init__.py"
           if ! grep -q "_p4a_android_prebuild" "$P3_RECIPE"; then
-            cat >> "$P3_RECIPE" << 'RECIPE_HOOK_EOF'
-
-
-# ===== Android Python 3.11.5 fix =====
-# Python 3.11 的 configure 会用 -Werror=implicit-function-declaration
-# 让 grpmodule.c 编译失败（Android Bionic libc 没有 setgrent/getgrent/endgrent）
-# 在配置前 sed 掉这个 flag，让它只是 warning 而不是 error
-import os as _p4a_os
-import subprocess as _p4a_sp
-
-_p4a_orig_prebuild = getattr(Python3Recipe, 'prebuild_arch', None)
-
-def _p4a_android_prebuild(self, arch):
-    if _p4a_orig_prebuild is not None:
-        _p4a_orig_prebuild(self, arch)
-    try:
-        bd = self.get_build_dir(arch.arch)
-        cfg = _p4a_os.path.join(bd, 'configure')
-        if _p4a_os.path.exists(cfg):
-            _p4a_sp.call([
-                'sed', '-i',
-                's/-Werror=implicit-function-declaration//g',
-                cfg
-            ])
-            print('[p4a-fix] patched configure (removed -Werror=implicit-function-declaration): ' + cfg)
-    except Exception as e:
-        print('[p4a-fix] failed to patch configure: ' + str(e))
-
-Python3Recipe.prebuild_arch = _p4a_android_prebuild
-RECIPE_HOOK_EOF
-            echo "已给 python3 recipe 追加 prebuild hook"
+            echo "" >> "$P3_RECIPE"
+            echo "# ===== Android Python 3.11.5 fix =====" >> "$P3_RECIPE"
+            echo "import os as _p4a_os" >> "$P3_RECIPE"
+            echo "import subprocess as _p4a_sp" >> "$P3_RECIPE"
+            echo "" >> "$P3_RECIPE"
+            echo "_p4a_orig_prebuild = getattr(Python3Recipe, 'prebuild_arch', None)" >> "$P3_RECIPE"
+            echo "" >> "$P3_RECIPE"
+            echo "def _p4a_android_prebuild(self, arch):" >> "$P3_RECIPE"
+            echo "    if _p4a_orig_prebuild is not None:" >> "$P3_RECIPE"
+            echo "        _p4a_orig_prebuild(self, arch)" >> "$P3_RECIPE"
+            echo "    try:" >> "$P3_RECIPE"
+            echo "        bd = self.get_build_dir(arch.arch)" >> "$P3_RECIPE"
+            echo "        cfg = _p4a_os.path.join(bd, 'configure')" >> "$P3_RECIPE"
+            echo "        if _p4a_os.path.exists(cfg):" >> "$P3_RECIPE"
+            echo "            _p4a_sp.call(['sed', '-i', 's/-Werror=implicit-function-declaration//g', cfg])" >> "$P3_RECIPE"
+            echo "            print('[p4a-fix] patched configure: ' + cfg)" >> "$P3_RECIPE"
+            echo "    except Exception as e:" >> "$P3_RECIPE"
+            echo "        print('[p4a-fix] failed: ' + str(e))" >> "$P3_RECIPE"
+            echo "" >> "$P3_RECIPE"
+            echo "Python3Recipe.prebuild_arch = _p4a_android_prebuild" >> "$P3_RECIPE"
+            echo "hook 已追加"
+          else
+            echo "hook 已存在，跳过"
           fi
 
-      - name: Patch default.spec (p4a.source_dir)
+      - name: Patch default.spec
         run: |
           source $HOME/venv/bin/activate
           DS="$VIRTUAL_ENV/lib/python3.11/site-packages/buildozer/default.spec"
@@ -225,90 +215,68 @@ RECIPE_HOOK_EOF
           fi
 
       # ============================================================
-      # 后台 patcher：持续保护补丁（防止 buildozer 覆盖）
-      # 包含：recipe version、recipe prebuild hook、PythonActivity、manifest 不动
+      # 后台 patcher：cat > 生成的 shell 脚本，用统一缩进
+      # patcher 内部也用 echo 逐行追加 hook，避免嵌套 heredoc
       # ============================================================
       - name: Start background patcher
         run: |
-          cat > /tmp/patcher.sh << 'PATCHER_SCRIPT_EOF'
-          #!/bin/bash
-          LOG=/tmp/patcher.log
-          echo "[Patcher] start $(date)" > "$LOG"
-          TARGET_PY="$TARGET_PYTHON"
-          TARBALL="/tmp/Python-${TARGET_PY}.tar.xz"
-          if [ -f "$TARBALL" ]; then
-            MD5=$(md5sum "$TARBALL" | awk '{print $1}')
-            SHA256=$(sha256sum "$TARBALL" | awk '{print $1}')
-          else
-            MD5=""; SHA256=""
-          fi
-          while true; do
-            for P4A in \
-              "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" \
-              "$HOME/.buildozer/android/platform/python-for-android"; do
-              [ -d "$P4A" ] || continue
-
-              # --- recipe version ---
-              for R in python3 hostpython3; do
-                F="$P4A/pythonforandroid/recipes/$R/__init__.py"
-                if [ -f "$F" ] && grep -qE "version = .3\.14\." "$F"; then
-                  sed -i -E "s/version = '3\.[0-9]+\.[0-9]+'/version = '$TARGET_PY'/" "$F"
-                  sed -i -E "s/version = \"3\.[0-9]+\.[0-9]+\"/version = '$TARGET_PY'/" "$F"
-                  [ -n "$MD5" ] && sed -i -E "s/md5sum = '[a-fA-F0-9]+'/md5sum = '$MD5'/" "$F"
-                  [ -n "$SHA256" ] && sed -i -E "s/sha256 = '[a-fA-F0-9]+'/sha256 = '$SHA256'/" "$F"
-                  echo "$(date) recipe $F" >> "$LOG"
-                fi
-              done
-
-              # --- recipe prebuild hook ---
-              P3="$P4A/pythonforandroid/recipes/python3/__init__.py"
-              if [ -f "$P3" ] && ! grep -q "_p4a_android_prebuild" "$P3"; then
-                cat >> "$P3" << 'RECIPE_HOOK_EOF2'
-
-
-# ===== Android Python 3.11.5 fix =====
-import os as _p4a_os
-import subprocess as _p4a_sp
-
-_p4a_orig_prebuild = getattr(Python3Recipe, 'prebuild_arch', None)
-
-def _p4a_android_prebuild(self, arch):
-    if _p4a_orig_prebuild is not None:
-        _p4a_orig_prebuild(self, arch)
-    try:
-        bd = self.get_build_dir(arch.arch)
-        cfg = _p4a_os.path.join(bd, 'configure')
-        if _p4a_os.path.exists(cfg):
-            _p4a_sp.call([
-                'sed', '-i',
-                's/-Werror=implicit-function-declaration//g',
-                cfg
-            ])
-            print('[p4a-fix] patched configure: ' + cfg)
-    except Exception as e:
-        print('[p4a-fix] failed: ' + str(e))
-
-Python3Recipe.prebuild_arch = _p4a_android_prebuild
-RECIPE_HOOK_EOF2
-                echo "$(date) hook added $P3" >> "$LOG"
-              fi
-
-              # --- PythonActivity ---
-              find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r F; do
-                if ! grep -q "loadQt6CoreFirst" "$F"; then
-                  sed -i '/^public class PythonActivity/a\
-          /* loadQt6CoreFirst */ static { try { String abi = android.os.Build.SUPPORTED_ABIS[0]; System.loadLibrary("Qt6Core_" + abi); } catch (Throwable t) { t.printStackTrace(); } }' "$F"
-                  echo "$(date) activity $F" >> "$LOG"
-                fi
-              done
-            done
-            sleep 1
-          done
-          PATCHER_SCRIPT_EOF
+          : > /tmp/patcher.sh
+          echo '#!/bin/bash' >> /tmp/patcher.sh
+          echo 'LOG=/tmp/patcher.log' >> /tmp/patcher.sh
+          echo 'echo "start $(date)" > $LOG' >> /tmp/patcher.sh
+          echo 'TARGET_PY="$TARGET_PYTHON"' >> /tmp/patcher.sh
+          echo 'TARBALL="/tmp/Python-${TARGET_PY}.tar.xz"' >> /tmp/patcher.sh
+          echo 'if [ -f "$TARBALL" ]; then MD5=$(md5sum "$TARBALL" | awk "{print \$1}"); SHA256=$(sha256sum "$TARBALL" | awk "{print \$1}"); else MD5=""; SHA256=""; fi' >> /tmp/patcher.sh
+          echo 'while true; do' >> /tmp/patcher.sh
+          echo '  for P4A in "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" "$HOME/.buildozer/android/platform/python-for-android"; do' >> /tmp/patcher.sh
+          echo '    [ -d "$P4A" ] || continue' >> /tmp/patcher.sh
+          echo '    for R in python3 hostpython3; do' >> /tmp/patcher.sh
+          echo '      F="$P4A/pythonforandroid/recipes/$R/__init__.py"' >> /tmp/patcher.sh
+          echo '      if [ -f "$F" ] && grep -qE "version = .3\.14\." "$F"; then' >> /tmp/patcher.sh
+          echo '        sed -i -E "s/version = .3\.[0-9]+\.[0-9]+./version = \"$TARGET_PY\"/" "$F"' >> /tmp/patcher.sh
+          echo '        [ -n "$MD5" ] && sed -i -E "s/md5sum = .[a-fA-F0-9]+./md5sum = \"$MD5\"/" "$F"' >> /tmp/patcher.sh
+          echo '        [ -n "$SHA256" ] && sed -i -E "s/sha256 = .[a-fA-F0-9]+./sha256 = \"$SHA256\"/" "$F"' >> /tmp/patcher.sh
+          echo '        echo "$(date) recipe $F" >> $LOG' >> /tmp/patcher.sh
+          echo '      fi' >> /tmp/patcher.sh
+          echo '    done' >> /tmp/patcher.sh
+          echo '    P3="$P4A/pythonforandroid/recipes/python3/__init__.py"' >> /tmp/patcher.sh
+          echo '    if [ -f "$P3" ] && ! grep -q "_p4a_android_prebuild" "$P3"; then' >> /tmp/patcher.sh
+          echo '      echo "" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "# ===== Android Python 3.11.5 fix =====" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "import os as _p4a_os" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "import subprocess as _p4a_sp" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "_p4a_orig_prebuild = getattr(Python3Recipe, '"'"'prebuild_arch'"'"', None)" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "def _p4a_android_prebuild(self, arch):" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "    if _p4a_orig_prebuild is not None:" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "        _p4a_orig_prebuild(self, arch)" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "    try:" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "        bd = self.get_build_dir(arch.arch)" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "        cfg = _p4a_os.path.join(bd, '"'"'configure'"'"')" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "        if _p4a_os.path.exists(cfg):" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "            _p4a_sp.call(['"'"'sed'"'"', '"'"'-i'"'"', '"'"'s/-Werror=implicit-function-declaration//g'"'"', cfg])" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "            print('"'"'[p4a-fix] patched configure: '"'"' + cfg)" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "    except Exception as e:" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "        print('"'"'[p4a-fix] failed: '"'"' + str(e))" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "Python3Recipe.prebuild_arch = _p4a_android_prebuild" >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "$(date) hook $P3" >> $LOG' >> /tmp/patcher.sh
+          echo '    fi' >> /tmp/patcher.sh
+          echo '    find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r F; do' >> /tmp/patcher.sh
+          echo '      if ! grep -q "loadQt6CoreFirst" "$F"; then' >> /tmp/patcher.sh
+          echo '        sed -i "/^public class PythonActivity/a\\/* loadQt6CoreFirst */ static { try { String abi = android.os.Build.SUPPORTED_ABIS[0]; System.loadLibrary(\\"Qt6Core_\\" + abi); } catch (Throwable t) { t.printStackTrace(); } }" "$F"' >> /tmp/patcher.sh
+          echo '        echo "$(date) activity $F" >> $LOG' >> /tmp/patcher.sh
+          echo '      fi' >> /tmp/patcher.sh
+          echo '    done' >> /tmp/patcher.sh
+          echo '  done' >> /tmp/patcher.sh
+          echo '  sleep 1' >> /tmp/patcher.sh
+          echo 'done' >> /tmp/patcher.sh
           chmod +x /tmp/patcher.sh
           nohup /tmp/patcher.sh > /dev/null 2>&1 &
           echo "$!" > /tmp/patcher.pid
           sleep 2
+          echo "=== Patcher 启动日志 ==="
           cat /tmp/patcher.log || true
 
       # ============================================================
@@ -354,19 +322,19 @@ RECIPE_HOOK_EOF2
           fi
 
           echo "=== 1. [p4a-fix] hook 是否被调用 ==="
-          grep -n "p4a-fix" "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "hook 没被调用"
+          grep -n "p4a-fix" "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "hook 未被调用"
 
           echo ""
           echo "=== 2. [ERROR] ==="
           grep -n '\[ERROR\]' "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "无 [ERROR]"
 
           echo ""
-          echo "=== 3. 编译错误（error: ，过滤 -Werror 干扰）==="
+          echo "=== 3. 真正的编译错误（过滤 -Werror 干扰）==="
           grep -nE ': error: |make(\[[0-9]+\])?: \*\*\*' "$GITHUB_WORKSPACE/build.log" | grep -v "implicit-function-declaration" | tail -20 || echo "无"
 
           echo ""
-          echo "=== 4. 编译 warning -Wimplicit-function-declaration（确认补丁生效）==="
-          grep -nE "implicit-function-declaration" "$GITHUB_WORKSPACE/build.log" | head -5 || echo "无"
+          echo "=== 4. grpmodule.c 是否还报错 ==="
+          grep -n "grpmodule.c" "$GITHUB_WORKSPACE/build.log" | tail -5 || echo "grpmodule.c 无报错（说明补丁生效）"
 
           echo ""
           echo "=== 5. gradle 失败位置 ==="
@@ -382,7 +350,7 @@ RECIPE_HOOK_EOF2
           fi
 
           echo ""
-          echo "=== 7. Traceback 位置 ==="
+          echo "=== 7. Traceback ==="
           grep -nE 'Traceback|RuntimeError|CalledProcessError' "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "无"
 
       - name: Collect APK
