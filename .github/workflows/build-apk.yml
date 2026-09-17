@@ -476,7 +476,7 @@ jobs:
           pyside6-android-deploy \
             --config-file pysidedeploy.spec \
             --wheel-pyside "$WHEEL_PYSIDE" \
-            --wheel-shbokken "$WHEEL_SHIBOKEN" \
+            --wheel-shiboken "$WHEEL_SHIBOKEN" \
             --ndk-path "$ANDROID_NDK_HOME" \
             --sdk-path "$ANDROID_HOME" \
             2>&1 | tee build.log
