@@ -144,7 +144,9 @@ jobs:
 
       # ============================================================
       # 预克隆 p4a + 初始补丁
-      #   Java 补丁改用 awk 插入标准多行静态块，避免 javac 报 cannot find symbol
+      #   补丁 1：recipe 版本 → 3.11.5
+      #   补丁 2：PythonActivity.java → 静态块加载 Qt6Core + onCreate 里设置 QtNative.setActivity
+      #   补丁 3：python3 recipe prebuild hook → 移除 -Werror=implicit-function-declaration
       # ============================================================
       - name: Pre-clone p4a and patch
         run: |
@@ -164,33 +166,45 @@ jobs:
             sed -i -E "s|/3\.14\.[0-9]+/Python-3\.14\.[0-9]+\.tar\.xz|/${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz|g" "$RF"
           done
 
-          # ---- 2. PythonActivity.java：用 awk 插入标准多行静态块 ----
+          # ---- 2. PythonActivity.java 补丁 ----
+          #   a) 类声明后插入静态块：加载 libQt6Core 缓存 JavaVM
+          #   b) onCreate 里插入 QtNative.setActivity(this)，解决 Activity 为 null
           echo "=== 查找所有 PythonActivity.java ==="
           find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r JF; do
-            echo "--- 找到: $JF ---"
-            if grep -q "loadQt6Core" "$JF"; then
+            echo "--- 处理: $JF ---"
+            if grep -q "_p4a_activity_patched" "$JF"; then
               echo "已打过补丁，跳过"
               continue
             fi
-            echo "修改前（类声明附近）:"
-            grep -n "^public class PythonActivity" "$JF" || true
 
+            # 用 awk 一次性完成两处插入
             awk '
             /^public class PythonActivity/ {
                 print;
+                print "    /* _p4a_activity_patched */";
                 print "    static {";
                 print "        try {";
                 print "            System.loadLibrary(\"Qt6Core_\" + android.os.Build.SUPPORTED_ABIS[0]);";
-                print "        } catch (Throwable ignored) {";
-                print "        }";
+                print "        } catch (Throwable ignored) {}";
                 print "    }";
+                next;
+            }
+            /onCreate\(Bundle/ {
+                print;
+                print "        /* _p4a_activity_patched */";
+                print "        try {";
+                print "            Class<?> _qtNative = Class.forName(\"org.qtproject.qt.android.QtNative\");";
+                print "            java.lang.reflect.Method _setAct = _qtNative.getDeclaredMethod(\"setActivity\", android.app.Activity.class);";
+                print "            _setAct.setAccessible(true);";
+                print "            _setAct.invoke(null, this);";
+                print "        } catch (Throwable ignored) {}";
                 next;
             }
             { print }
             ' "$JF" > "$JF.new" && mv "$JF.new" "$JF"
 
-            echo "修改后（前 30 行）:"
-            head -30 "$JF"
+            echo "修改后（前 45 行）:"
+            head -45 "$JF"
           done
 
           # ---- 3. python3 recipe prebuild hook（逐行 echo）----
@@ -230,7 +244,7 @@ jobs:
           fi
 
       # ============================================================
-      # 后台 patcher：用 awk 插入 Java 静态块（逐行 echo 生成脚本）
+      # 后台 patcher：用 awk 单行生成脚本，防止 buildozer 覆盖补丁
       # ============================================================
       - name: Start background patcher
         run: |
@@ -275,8 +289,8 @@ jobs:
           echo '      echo "$(date) hook $P3" >> $LOG' >> /tmp/patcher.sh
           echo '    fi' >> /tmp/patcher.sh
           echo '    find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r F; do' >> /tmp/patcher.sh
-          echo '      if ! grep -q "loadQt6Core" "$F"; then' >> /tmp/patcher.sh
-          echo '        awk "/^public class PythonActivity/ { print; print \"    static {\"; print \"        try {\"; print \"            System.loadLibrary(\\\"Qt6Core_\\\" + android.os.Build.SUPPORTED_ABIS[0]);\"; print \"        } catch (Throwable ignored) {\"; print \"        }\"; print \"    }\"; next; } { print }" "$F" > "$F.new" && mv "$F.new" "$F"' >> /tmp/patcher.sh
+          echo '      if ! grep -q "_p4a_activity_patched" "$F"; then' >> /tmp/patcher.sh
+          echo '        awk "/^public class PythonActivity/ { print; print \"    /* _p4a_activity_patched */\"; print \"    static {\"; print \"        try {\"; print \"            System.loadLibrary(\\\"Qt6Core_\\\" + android.os.Build.SUPPORTED_ABIS[0]);\"; print \"        } catch (Throwable ignored) {}\"; print \"    }\"; next; } /onCreate\\(Bundle/ { print; print \"        /* _p4a_activity_patched */\"; print \"        try {\"; print \"            Class<?> _qtNative = Class.forName(\\\"org.qtproject.qt.android.QtNative\\\");\"; print \"            java.lang.reflect.Method _setAct = _qtNative.getDeclaredMethod(\\\"setActivity\\\", android.app.Activity.class);\"; print \"            _setAct.setAccessible(true);\"; print \"            _setAct.invoke(null, this);\"; print \"        } catch (Throwable ignored) {}\"; next; } { print }" "$F" > "$F.new" && mv "$F.new" "$F"' >> /tmp/patcher.sh
           echo '        echo "$(date) activity $F" >> $LOG' >> /tmp/patcher.sh
           echo '      fi' >> /tmp/patcher.sh
           echo '    done' >> /tmp/patcher.sh
@@ -332,42 +346,27 @@ jobs:
             exit 0
           fi
 
-          echo "=== 1. [p4a-fix] hook 是否被调用 ==="
-          grep -n "p4a-fix" "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "hook 未被调用"
+          echo "=== 1. [p4a-fix] hook ==="
+          grep -n "p4a-fix" "$GITHUB_WORKSPACE/build.log" | tail -5 || echo "hook 未被调用"
 
           echo ""
-          echo "=== 2. [ERROR] ==="
-          grep -n '\[ERROR\]' "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "无 [ERROR]"
+          echo "=== 2. Java 编译错误 ==="
+          grep -nE ': error: |cannot find symbol' "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "无 Java 错误"
 
           echo ""
-          echo "=== 3. 编译错误（过滤 -Werror 干扰）==="
-          grep -nE ': error: |make(\[[0-9]+\])?: \*\*\*' "$GITHUB_WORKSPACE/build.log" | grep -v "implicit-function-declaration" | tail -20 || echo "无"
-
-          echo ""
-          echo "=== 4. Java 编译错误 cannot find symbol 完整上下文 ==="
-          grep -B 2 -A 10 "cannot find symbol" "$GITHUB_WORKSPACE/build.log" | head -80 || echo "无 cannot find symbol"
-
-          echo ""
-          echo "=== 5. 实际 PythonActivity.java 内容（行 1~40）==="
+          echo "=== 3. 实际 PythonActivity.java（前 50 行）==="
           JAVA_FILE=$(find /home/runner/work/quiz-assistant/quiz-assistant/.buildozer/android/platform/build-arm64-v8a -name "PythonActivity.java" 2>/dev/null | head -1)
           if [ -n "$JAVA_FILE" ]; then
             echo "文件: $JAVA_FILE"
-            sed -n '1,40p' "$JAVA_FILE"
+            sed -n '1,50p' "$JAVA_FILE"
           else
             echo "未找到 PythonActivity.java"
           fi
 
           echo ""
-          echo "=== 6. gradle 失败位置 ==="
-          grep -n "gradlew failed" "$GITHUB_WORKSPACE/build.log" | head -3 || echo "无"
-
-          echo ""
-          echo "=== 7. gradle 之前 40 行 ==="
-          FAIL_LINE=$(grep -n "gradlew failed" "$GITHUB_WORKSPACE/build.log" | head -1 | cut -d: -f1)
-          if [ -n "$FAIL_LINE" ]; then
-            START=$((FAIL_LINE - 40))
-            [ "$START" -lt 1 ] && START=1
-            sed -n "${START},${FAIL_LINE}p" "$GITHUB_WORKSPACE/build.log"
+          echo "=== 4. 是否有 _p4a_activity_patched 标记 ==="
+          if [ -n "$JAVA_FILE" ]; then
+            grep -n "_p4a_activity_patched" "$JAVA_FILE" || echo "无标记"
           fi
 
       - name: Collect APK
