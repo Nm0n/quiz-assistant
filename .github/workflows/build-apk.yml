@@ -1,9 +1,20 @@
+# .github/workflows/build-apk.yml
+#
+# 完整版：v3，包含：
+#   - PySide6 6.9.2 + cp311 wheel
+#   - NDK r27c（Qt 6.9.2 硬性要求，不可降级）
+#   - JDK 17 + JAXB 注入
+#   - 预克隆 p4a + 双位置补丁（Python 版本 + JNI 修复）
+#   - 后台 patcher：监控 recipe + manifest，实时拦截 3.14 和权限缺失
+#   - APK 产物验证：libpython3.11.so + MANAGE_EXTERNAL_STORAGE
+
 name: Build Android APK
 
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*' ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -12,92 +23,146 @@ env:
   PYTHON_VERSION: '3.11'
   PYSIDE_VERSION: '6.9.2'
   ANDROID_SDK_VERSION: '33'
-  ANDROID_NDK_VERSION: '26.1.10909125'
+  ANDROID_NDK_VERSION: '27.2.12479018'
   ANDROID_BUILD_TOOLS: '33.0.2'
   ANDROID_HOME: /usr/local/lib/android/sdk
   TARGET_PYTHON: '3.11.5'
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 jobs:
   build-apk:
     name: Build APK (arm64-v8a)
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 120
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Create venv
+      # ============================================================
+      # venv（经验 22：必须 GITHUB_ENV + GITHUB_PATH 双写）
+      # ============================================================
+      - name: Create and activate venv
         run: |
           python -m venv $HOME/venv
           echo "VIRTUAL_ENV=$HOME/venv" >> "$GITHUB_ENV"
           echo "$HOME/venv/bin" >> "$GITHUB_PATH"
           source $HOME/venv/bin/activate
           python --version
+          which python
+          pip --version
 
+      # ============================================================
+      # JDK 17（经验 9：统一 JDK 17 + JAXB）
+      # ============================================================
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install Android cmdline-tools
+      - name: Verify Java
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+
+      # ============================================================
+      # cmdline-tools 手动安装（经验 52：不用 setup-android）
+      # ============================================================
+      - name: Manually install Android cmdline-tools
         run: |
           sudo mkdir -p "$ANDROID_HOME"
           sudo chown -R $USER:$USER "$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+
           cd /tmp
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-12266719_latest.zip -O cmdline-tools.zip
           unzip -q cmdline-tools.zip
+
           rm -rf "$ANDROID_HOME/cmdline-tools"
           mkdir -p "$ANDROID_HOME/cmdline-tools"
           mv cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
-          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
 
-      - name: Ensure JAXB + legacy symlinks
+          echo "=== lib 目录里的 JAXB jar ==="
+          ls "$ANDROID_HOME/cmdline-tools/latest/lib/" | grep -i "jaxb" || echo "!!! JAXB 未找到，稍后注入 !!!"
+
+      # ============================================================
+      # JAXB 注入（经验 8 + 23：必须显式写进 CLASSPATH）
+      # ============================================================
+      - name: Ensure JAXB in sdkmanager CLASSPATH
         run: |
           SDKMGR="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           LIBDIR="$ANDROID_HOME/cmdline-tools/latest/lib"
+
           mkdir -p "$LIBDIR"
           cd "$LIBDIR"
           wget -q https://repo1.maven.org/maven2/javax/xml/bind/jaxb-api/2.3.1/jaxb-api-2.3.1.jar
           wget -q https://repo1.maven.org/maven2/com/sun/xml/bind/jaxb-impl/2.3.1/jaxb-impl-2.3.1.jar
           wget -q https://repo1.maven.org/maven2/org/glassfish/jaxb/jaxb-core/2.3.0/jaxb-core-2.3.0.jar
           wget -q https://repo1.maven.org/maven2/javax/activation/javax.activation-api/1.2.0/javax.activation-api-1.2.0.jar
+
           if ! grep -q "jaxb-api-2.3.1" "$SDKMGR"; then
             sed -i "s|^CLASSPATH=\"|CLASSPATH=\"$LIBDIR/jaxb-api-2.3.1.jar:$LIBDIR/jaxb-impl-2.3.1.jar:$LIBDIR/jaxb-core-2.3.0.jar:$LIBDIR/javax.activation-api-1.2.0.jar:|" "$SDKMGR"
           fi
-          mkdir -p "$ANDROID_HOME/tools/bin" "$ANDROID_HOME/cmdline-tools/bin"
+
+          echo "=== 修改后 CLASSPATH ==="
+          grep -n "CLASSPATH" "$SDKMGR" || true
+
+      # ============================================================
+      # legacy 软链接（经验 10）
+      # ============================================================
+      - name: Create legacy sdkmanager symlinks
+        run: |
+          mkdir -p "$ANDROID_HOME/tools/bin"
+          mkdir -p "$ANDROID_HOME/cmdline-tools/bin"
           ln -sf "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "$ANDROID_HOME/tools/bin/sdkmanager"
           ln -sf "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" "$ANDROID_HOME/tools/bin/avdmanager"
           ln -sf "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "$ANDROID_HOME/cmdline-tools/bin/sdkmanager"
           ln -sf "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" "$ANDROID_HOME/cmdline-tools/bin/avdmanager"
+
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/tools/bin" >> "$GITHUB_PATH"
 
-      - name: Install Android SDK + NDK r26b
+      - name: Verify sdkmanager works
+        run: |
+          which sdkmanager
+          sdkmanager --version
+
+      - name: Install Android SDK components
         run: |
           yes | sdkmanager --install \
             "platform-tools" \
             "platforms;android-${ANDROID_SDK_VERSION}" \
             "build-tools;${ANDROID_BUILD_TOOLS}" || true
           yes | sdkmanager --licenses || true
+
+      # ============================================================
+      # NDK r27c（经验 1：Qt 6.9.2 硬性要求）
+      # ============================================================
+      - name: Install Android NDK r27c
+        run: |
           yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
           test -d "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" || (echo "NDK 安装失败" && exit 1)
+          echo "NDK r27c 已安装"
+          ls "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}/" | head -20
 
-      - name: Export env vars
+      - name: Export NDK env
         run: |
-          NDK="$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}"
-          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_PATH=$NDK" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK=$NDK" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_LATEST_HOME=$NDK" >> "$GITHUB_ENV"
-          echo "NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_PATH=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
 
+      # ============================================================
+      # 系统依赖（经验 11：libffi/autoconf 必需）
+      # ============================================================
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -108,14 +173,25 @@ jobs:
             python3 python3-dev python3-pip python3-venv \
             unzip wget zip
 
-      - name: Install PySide6 and tools
+      # ============================================================
+      # PySide6 及工具链（经验 7：隐藏依赖主动装）
+      # ============================================================
+      - name: Install PySide6 and deploy tools in venv
         run: |
           source $HOME/venv/bin/activate
+          which python
+          which pip
           python -m pip install --upgrade pip
-          pip install "PySide6==${PYSIDE_VERSION}" "shiboken6==${PYSIDE_VERSION}"
+          pip install "PySide6==${PYSIDE_VERSION}"
+          pip install "shiboken6==${PYSIDE_VERSION}"
           pip install packaging jinja2 pkginfo tqdm
           pip install buildozer cython virtualenv
+          pip list | grep -i -E "pyside|shiboken|buildozer"
+          which pyside6-android-deploy
 
+      # ============================================================
+      # 下载 Android wheel（经验 5：wget 直连 Qt 官方镜像）
+      # ============================================================
       - name: Download Android Wheels
         run: |
           mkdir -p wheels
@@ -127,187 +203,258 @@ jobs:
             -O "wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
           ls -lh wheels/
 
-      - name: Sanity check
+      - name: Sanity check project layout
         run: |
-          for f in main.py pysidedeploy.spec core qml qml/main.qml; do
-            test -e "$f" || (echo "缺少 $f" && exit 1)
-          done
+          test -f main.py            || (echo "缺少 main.py" && exit 1)
+          test -f pysidedeploy.spec  || (echo "缺少 pysidedeploy.spec" && exit 1)
+          test -d core               || (echo "缺少 core/" && exit 1)
+          test -d qml                || (echo "缺少 qml/" && exit 1)
+          test -f qml/main.qml       || (echo "缺少 qml/main.qml" && exit 1)
 
-      - name: Download Python and compute checksums
+      # ============================================================
+      # 下载 Python 3.11.5 源码包并计算校验和（经验 4：改 recipe 必须覆盖 md5/sha）
+      # ============================================================
+      - name: Download Python ${{ env.TARGET_PYTHON }} and compute checksums
         run: |
           cd /tmp
-          wget -q "https://www.python.org/ftp/python/${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz"
+          wget -q "https://www.python.org/ftp/python/${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz" \
+            -O "Python-${TARGET_PYTHON}.tar.xz"
+          ls -lh "Python-${TARGET_PYTHON}.tar.xz"
+
           MD5=$(md5sum "Python-${TARGET_PYTHON}.tar.xz" | awk '{print $1}')
           SHA256=$(sha256sum "Python-${TARGET_PYTHON}.tar.xz" | awk '{print $1}')
+
           echo "PY_TARBALL_MD5=$MD5" >> "$GITHUB_ENV"
           echo "PY_TARBALL_SHA256=$SHA256" >> "$GITHUB_ENV"
 
-      # ============================================================
-      # 创建补丁模板文件（避免嵌套转义）
-      #   /tmp/p4a_hook.txt       —— Python recipe hook
-      #   /tmp/patch_activity.awk —— Java 补丁 awk 脚本
-      #   /tmp/patcher.sh         —— 后台监控脚本
-      # ============================================================
-      - name: Create patch template files
-        run: |
-          # ---------- 1. /tmp/p4a_hook.txt ----------
-          : > /tmp/p4a_hook.txt
-          echo '' >> /tmp/p4a_hook.txt
-          echo '# ===== Android Python 3.11.5 fix =====' >> /tmp/p4a_hook.txt
-          echo 'import os as _p4a_os' >> /tmp/p4a_hook.txt
-          echo 'import subprocess as _p4a_sp' >> /tmp/p4a_hook.txt
-          echo '' >> /tmp/p4a_hook.txt
-          echo "_p4a_orig_prebuild = getattr(Python3Recipe, 'prebuild_arch', None)" >> /tmp/p4a_hook.txt
-          echo '' >> /tmp/p4a_hook.txt
-          echo 'def _p4a_android_prebuild(self, arch):' >> /tmp/p4a_hook.txt
-          echo '    if _p4a_orig_prebuild is not None:' >> /tmp/p4a_hook.txt
-          echo '        _p4a_orig_prebuild(self, arch)' >> /tmp/p4a_hook.txt
-          echo '    try:' >> /tmp/p4a_hook.txt
-          echo '        bd = self.get_build_dir(arch.arch)' >> /tmp/p4a_hook.txt
-          echo "        cfg = _p4a_os.path.join(bd, 'configure')" >> /tmp/p4a_hook.txt
-          echo '        if _p4a_os.path.exists(cfg):' >> /tmp/p4a_hook.txt
-          echo "            _p4a_sp.call(['sed', '-i', 's/-Werror=implicit-function-declaration//g', cfg])" >> /tmp/p4a_hook.txt
-          echo "            print('[p4a-fix] patched configure: ' + cfg)" >> /tmp/p4a_hook.txt
-          echo '    except Exception as e:' >> /tmp/p4a_hook.txt
-          echo "        print('[p4a-fix] failed: ' + str(e))" >> /tmp/p4a_hook.txt
-          echo '' >> /tmp/p4a_hook.txt
-          echo 'Python3Recipe.prebuild_arch = _p4a_android_prebuild' >> /tmp/p4a_hook.txt
-
-          echo "===== /tmp/p4a_hook.txt 内容 ====="
-          cat /tmp/p4a_hook.txt
-
-          # ---------- 2. /tmp/patch_activity.awk ----------
-          : > /tmp/patch_activity.awk
-          echo '/^public class PythonActivity/ {' >> /tmp/patch_activity.awk
-          echo '    print;' >> /tmp/patch_activity.awk
-          echo '    print "    /* _p4a_activity_patched */";' >> /tmp/patch_activity.awk
-          echo '    print "    static {";' >> /tmp/patch_activity.awk
-          echo '    print "        try {";' >> /tmp/patch_activity.awk
-          echo '    print "            System.loadLibrary(\"Qt6Core_\" + android.os.Build.SUPPORTED_ABIS[0]);";' >> /tmp/patch_activity.awk
-          echo '    print "        } catch (Throwable ignored) {}";' >> /tmp/patch_activity.awk
-          echo '    print "    }";' >> /tmp/patch_activity.awk
-          echo '    next;' >> /tmp/patch_activity.awk
-          echo '}' >> /tmp/patch_activity.awk
-          echo '/onCreate\(Bundle/ {' >> /tmp/patch_activity.awk
-          echo '    print;' >> /tmp/patch_activity.awk
-          echo '    print "        /* _p4a_activity_patched */";' >> /tmp/patch_activity.awk
-          echo '    print "        try {";' >> /tmp/patch_activity.awk
-          echo '    print "            Class<?> _qtNative = Class.forName(\"org.qtproject.qt.android.QtNative\");";' >> /tmp/patch_activity.awk
-          echo '    print "            java.lang.reflect.Method _setAct = _qtNative.getDeclaredMethod(\"setActivity\", android.app.Activity.class);";' >> /tmp/patch_activity.awk
-          echo '    print "            _setAct.setAccessible(true);";' >> /tmp/patch_activity.awk
-          echo '    print "            _setAct.invoke(null, this);";' >> /tmp/patch_activity.awk
-          echo '    print "        } catch (Throwable ignored) {}";' >> /tmp/patch_activity.awk
-          echo '    next;' >> /tmp/patch_activity.awk
-          echo '}' >> /tmp/patch_activity.awk
-          echo '{ print }' >> /tmp/patch_activity.awk
-
-          echo "===== /tmp/patch_activity.awk 内容 ====="
-          cat /tmp/patch_activity.awk
-
-          # ---------- 3. /tmp/patcher.sh ----------
-          : > /tmp/patcher.sh
-          echo '#!/bin/bash' >> /tmp/patcher.sh
-          echo 'LOG=/tmp/patcher.log' >> /tmp/patcher.sh
-          echo 'echo "start $(date)" > $LOG' >> /tmp/patcher.sh
-          echo 'TARGET_PY="$TARGET_PYTHON"' >> /tmp/patcher.sh
-          echo 'TARBALL="/tmp/Python-${TARGET_PY}.tar.xz"' >> /tmp/patcher.sh
-          echo 'if [ -f "$TARBALL" ]; then MD5=$(md5sum "$TARBALL" | awk "{print \$1}"); SHA256=$(sha256sum "$TARBALL" | awk "{print \$1}"); else MD5=""; SHA256=""; fi' >> /tmp/patcher.sh
-          echo 'while true; do' >> /tmp/patcher.sh
-          echo '  for P4A in "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" "$HOME/.buildozer/android/platform/python-for-android"; do' >> /tmp/patcher.sh
-          echo '    [ -d "$P4A" ] || continue' >> /tmp/patcher.sh
-          echo '    for R in python3 hostpython3; do' >> /tmp/patcher.sh
-          echo '      F="$P4A/pythonforandroid/recipes/$R/__init__.py"' >> /tmp/patcher.sh
-          echo '      if [ -f "$F" ] && grep -qE "version = .3\.14\." "$F"; then' >> /tmp/patcher.sh
-          echo '        sed -i -E "s/version = .3\.[0-9]+\.[0-9]+./version = \"$TARGET_PY\"/" "$F"' >> /tmp/patcher.sh
-          echo '        echo "$(date) recipe $F" >> $LOG' >> /tmp/patcher.sh
-          echo '      fi' >> /tmp/patcher.sh
-          echo '    done' >> /tmp/patcher.sh
-          echo '    P3="$P4A/pythonforandroid/recipes/python3/__init__.py"' >> /tmp/patcher.sh
-          echo '    if [ -f "$P3" ] && ! grep -q "_p4a_android_prebuild" "$P3"; then' >> /tmp/patcher.sh
-          echo '      cat /tmp/p4a_hook.txt >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "$(date) hook appended to $P3" >> $LOG' >> /tmp/patcher.sh
-          echo '    fi' >> /tmp/patcher.sh
-          echo '    find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r F; do' >> /tmp/patcher.sh
-          echo '      if ! grep -q "_p4a_activity_patched" "$F"; then' >> /tmp/patcher.sh
-          echo '        awk -f /tmp/patch_activity.awk "$F" > "$F.new" && mv "$F.new" "$F"' >> /tmp/patcher.sh
-          echo '        echo "$(date) activity $F" >> $LOG' >> /tmp/patcher.sh
-          echo '      fi' >> /tmp/patcher.sh
-          echo '    done' >> /tmp/patcher.sh
-          echo '  done' >> /tmp/patcher.sh
-          echo '  sleep 1' >> /tmp/patcher.sh
-          echo 'done' >> /tmp/patcher.sh
-          chmod +x /tmp/patcher.sh
-
-          echo "===== /tmp/patcher.sh 内容 ====="
-          cat /tmp/patcher.sh
+          echo "======== Python ${TARGET_PYTHON} 校验和 ========"
+          echo "MD5    = $MD5"
+          echo "SHA256 = $SHA256"
 
       # ============================================================
-      # 预克隆 p4a + 初始补丁（用模板文件）
+      # 预克隆 p4a + 初始补丁（recipe + JNI + manifest）
       # ============================================================
-      - name: Pre-clone p4a and patch
+      - name: Pre-clone p4a to both locations and patch
         run: |
           set -e
-          P4A="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android"
-          rm -rf "$GITHUB_WORKSPACE/.buildozer"
-          mkdir -p "$(dirname "$P4A")"
-          git clone -b develop --single-branch https://github.com/kivy/python-for-android.git "$P4A"
 
-          # ---- 1. recipe 版本 ----
-          for R in python3 hostpython3; do
-            RF="$P4A/pythonforandroid/recipes/$R/__init__.py"
-            [ -f "$RF" ] || continue
-            sed -i -E "s/^([[:space:]]*version[[:space:]]*=[[:space:]]*)['\"]3\.[0-9]+\.[0-9]+['\"]/\1'${TARGET_PYTHON}'/" "$RF"
-            sed -i -E "s/^([[:space:]]*md5sum[[:space:]]*=[[:space:]]*)['\"][a-fA-F0-9]+['\"]/\1'${PY_TARBALL_MD5}'/" "$RF"
-            sed -i -E "s/^([[:space:]]*sha256[[:space:]]*=[[:space:]]*)['\"][a-fA-F0-9]+['\"]/\1'${PY_TARBALL_SHA256}'/" "$RF"
-            sed -i -E "s|/3\.14\.[0-9]+/Python-3\.14\.[0-9]+\.tar\.xz|/${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz|g" "$RF"
-          done
+          P4A_DIR_A="$GITHUB_WORKSPACE/python-for-android"
+          P4A_DIR_B="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android"
 
-          # ---- 2. python3 recipe hook（从模板文件追加）----
-          P3_RECIPE="$P4A/pythonforandroid/recipes/python3/__init__.py"
-          if ! grep -q "_p4a_android_prebuild" "$P3_RECIPE"; then
-            cat /tmp/p4a_hook.txt >> "$P3_RECIPE"
-          fi
+          rm -rf "$P4A_DIR_A" "$GITHUB_WORKSPACE/.buildozer"
+          mkdir -p "$(dirname "$P4A_DIR_B")"
 
-          # ---- 3. PythonActivity.java（用 awk 文件）----
-          find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r JF; do
-            if ! grep -q "_p4a_activity_patched" "$JF"; then
-              awk -f /tmp/patch_activity.awk "$JF" > "$JF.new" && mv "$JF.new" "$JF"
-              echo "已补丁: $JF"
+          echo "======== Clone p4a 到位置 A ========"
+          git clone -b develop --single-branch https://github.com/kivy/python-for-android.git "$P4A_DIR_A"
+
+          echo "======== 复制到位置 B ========"
+          cp -r "$P4A_DIR_A" "$P4A_DIR_B"
+
+          for P4A_DIR in "$P4A_DIR_A" "$P4A_DIR_B"; do
+            echo ""
+            echo "============================================================"
+            echo "======== 给 $P4A_DIR 打补丁 ========"
+            echo "============================================================"
+            cd "$P4A_DIR"
+
+            # ---------- 1. recipe 版本修补 ----------
+            for RECIPE_NAME in python3 hostpython3; do
+              RECIPE_FILE="pythonforandroid/recipes/$RECIPE_NAME/__init__.py"
+              echo "---- 修改 $RECIPE_FILE ----"
+
+              sed -i -E "s/^([[:space:]]*version[[:space:]]*=[[:space:]]*)['\"]3\.[0-9]+\.[0-9]+['\"]/\1'${TARGET_PYTHON}'/" "$RECIPE_FILE"
+              sed -i -E "s/^([[:space:]]*md5sum[[:space:]]*=[[:space:]]*)['\"][a-fA-F0-9]+['\"]/\1'${PY_TARBALL_MD5}'/" "$RECIPE_FILE"
+              sed -i -E "s/^([[:space:]]*sha256[[:space:]]*=[[:space:]]*)['\"][a-fA-F0-9]+['\"]/\1'${PY_TARBALL_SHA256}'/" "$RECIPE_FILE"
+              sed -i -E "s|/3\.14\.[0-9]+/Python-3\.14\.[0-9]+\.tar\.xz|/${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz|g" "$RECIPE_FILE"
+
+              grep -nE "version|md5sum|sha256|url" "$RECIPE_FILE" | head -20
+            done
+
+            # ---------- 2. JNI 修复：PythonActivity 静态块 ----------
+            JAVA_FILE=$(find "$P4A_DIR" -name "PythonActivity.java" -type f 2>/dev/null | head -1)
+            if [ -z "$JAVA_FILE" ]; then
+              echo "警告：未找到 PythonActivity.java"
+            else
+              if ! grep -q "loadQt6CoreFirst" "$JAVA_FILE"; then
+                sed -i '/^public class PythonActivity/a\
+              /* loadQt6CoreFirst */\
+              static {\
+                  try {\
+                      String abi = android.os.Build.SUPPORTED_ABIS[0];\
+                      System.loadLibrary("Qt6Core_" + abi);\
+                  } catch (Throwable t) {\
+                      t.printStackTrace();\
+                  }\
+              }' "$JAVA_FILE"
+                echo "已插入 Qt6Core 静态块"
+              else
+                echo "Qt6Core 静态块已存在，跳过"
+              fi
             fi
+
+            # ---------- 3. manifest 权限注入（初次尝试） ----------
+            MANIFEST_FILES=$(find "$P4A_DIR" -type f \( -name "AndroidManifest*.xml" -o -name "AndroidManifest*.tmpl*" \) 2>/dev/null || true)
+            echo "---- 发现 manifest 文件 ----"
+            echo "$MANIFEST_FILES"
+            echo "$MANIFEST_FILES" | while IFS= read -r mf; do
+              [ -f "$mf" ] || continue
+              grep -q '<manifest' "$mf" 2>/dev/null || continue
+              grep -q '<application' "$mf" 2>/dev/null || continue
+              grep -q 'MANAGE_EXTERNAL_STORAGE' "$mf" && continue
+
+              if ! grep -q 'xmlns:tools=' "$mf"; then
+                sed -i 's|xmlns:android="http://schemas.android.com/apk/res/android"|xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools"|' "$mf" || true
+              fi
+              sed -i 's|<application|<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />\n    <application|' "$mf" || true
+              echo "已注入权限到 $mf"
+            done
+
+            # 最终检查
+            grep -nE "^[[:space:]]*version[[:space:]]*=" "pythonforandroid/recipes/python3/__init__.py" || true
           done
 
-          # ---- 4. 验证 python3 recipe 语法 ----
-          echo "===== 验证 recipe 语法 ====="
-          python3 -c "import ast; ast.parse(open('$P3_RECIPE').read()); print('recipe 语法 OK')" || echo "recipe 语法错误！"
+          echo "======== 最终确认 ========"
+          echo "位置 A p4a: $(test -d "$P4A_DIR_A" && echo 存在 || echo 不存在)"
+          echo "位置 B p4a: $(test -d "$P4A_DIR_B" && echo 存在 || echo 不存在)"
 
-      - name: Patch default.spec
+      # ============================================================
+      # 修改 buildozer default.spec
+      # ============================================================
+      - name: Patch buildozer default.spec to use our p4a
         run: |
           source $HOME/venv/bin/activate
-          DS="$VIRTUAL_ENV/lib/python3.11/site-packages/buildozer/default.spec"
-          P4A="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android"
-          if grep -q "^p4a.source_dir" "$DS"; then
-            sed -i "s|^p4a.source_dir.*|p4a.source_dir = ${P4A}|" "$DS"
-          else
-            sed -i "/^\[buildozer\]/a p4a.source_dir = ${P4A}" "$DS"
+          DEFAULT_SPEC="$VIRTUAL_ENV/lib/python3.11/site-packages/buildozer/default.spec"
+
+          if [ ! -f "$DEFAULT_SPEC" ]; then
+            echo "!!! 找不到 default.spec: $DEFAULT_SPEC"
+            find "$VIRTUAL_ENV" -name "default.spec" 2>/dev/null || true
+            exit 1
           fi
 
+          P4A_DIR_B="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android"
+
+          if grep -q "^p4a.source_dir" "$DEFAULT_SPEC"; then
+            sed -i "s|^p4a.source_dir.*|p4a.source_dir = ${P4A_DIR_B}|" "$DEFAULT_SPEC"
+          else
+            sed -i "/^\[buildozer\]/a p4a.source_dir = ${P4A_DIR_B}" "$DEFAULT_SPEC"
+          fi
+
+          grep -A 20 "^\[buildozer\]" "$DEFAULT_SPEC" || true
+
       # ============================================================
-      # 启动后台 patcher
+      # 清理构建缓存
       # ============================================================
-      - name: Start background patcher
+      - name: Clean p4a build cache
         run: |
-          nohup /tmp/patcher.sh > /dev/null 2>&1 &
+          PLATFORM_DIR="$GITHUB_WORKSPACE/.buildozer/android/platform"
+
+          find "$PLATFORM_DIR" -maxdepth 1 -type d -name "build-*" -exec rm -rf {} + 2>/dev/null || true
+          rm -rf "$PLATFORM_DIR/python-for-android/dists" 2>/dev/null || true
+          rm -rf "$PLATFORM_DIR/python-for-android/build" 2>/dev/null || true
+          rm -rf "$PLATFORM_DIR/python-for-android/.buildozer" 2>/dev/null || true
+
+          echo "======== 确认 p4a recipe 状态 ========"
+          grep -nE "^[[:space:]]*version[[:space:]]*=" "$PLATFORM_DIR/python-for-android/pythonforandroid/recipes/python3/__init__.py" || true
+
+      # ============================================================
+      # 后台 patcher：监控 recipe + manifest
+      # ============================================================
+      - name: Start background p4a patcher
+        run: |
+          PATCHER_SCRIPT="$GITHUB_WORKSPACE/p4a_patcher.sh"
+
+          cat > "$PATCHER_SCRIPT" <<'PATCHER_EOF'
+          #!/bin/bash
+          LOG="/tmp/patcher.log"
+          echo "[Patcher] 启动于 $(date)" > "$LOG"
+
+          inject_manifest() {
+              local mf="$1"
+              [ -f "$mf" ] || return 0
+              grep -q '<manifest' "$mf" 2>/dev/null || return 0
+              grep -q '<application' "$mf" 2>/dev/null || return 0
+              grep -q 'MANAGE_EXTERNAL_STORAGE' "$mf" 2>/dev/null && return 0
+
+              if ! grep -q 'xmlns:tools=' "$mf"; then
+                  sed -i 's|xmlns:android="http://schemas.android.com/apk/res/android"|xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools"|' "$mf" 2>/dev/null || true
+              fi
+              sed -i 's|<application|<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />\n    <application|' "$mf" 2>/dev/null || true
+              echo "[Patcher] $(date) 注入权限到 $mf" >> "$LOG"
+          }
+
+          while true; do
+              for P4A_DIR in \
+                "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" \
+                "$GITHUB_WORKSPACE/python-for-android" \
+                "$HOME/.buildozer/android/platform/python-for-android" ; do
+                  [ -d "$P4A_DIR" ] || continue
+
+                  # recipe 修补
+                  for RECIPE_REL in "pythonforandroid/recipes/python3/__init__.py" "pythonforandroid/recipes/hostpython3/__init__.py" ; do
+                      RECIPE_FILE="$P4A_DIR/$RECIPE_REL"
+                      if [ -f "$RECIPE_FILE" ] && grep -qE "3\.14" "$RECIPE_FILE"; then
+                          echo "[Patcher] $(date) 修补 recipe: $RECIPE_FILE" >> "$LOG"
+                          sed -i -E "s/version = '3\.14\.[0-9]+'/version = '${TARGET_PYTHON}'/" "$RECIPE_FILE" 2>/dev/null || true
+                          sed -i -E "s/version = \"3\.14\.[0-9]+\"/version = '${TARGET_PYTHON}'/" "$RECIPE_FILE" 2>/dev/null || true
+                          sed -i -E "s/md5sum = '[a-fA-F0-9]+'/md5sum = '${PY_TARBALL_MD5}'/" "$RECIPE_FILE" 2>/dev/null || true
+                          sed -i -E "s/sha256 = '[a-fA-F0-9]+'/sha256 = '${PY_TARBALL_SHA256}'/" "$RECIPE_FILE" 2>/dev/null || true
+                          sed -i -E "s|3\.14\.[0-9]+/Python-3\.14\.[0-9]+\.tar\.xz|${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz|g" "$RECIPE_FILE" 2>/dev/null || true
+                      fi
+                  done
+
+                  # manifest 注入（p4a 内部）
+                  find "$P4A_DIR" -type f \( -name "AndroidManifest*.xml" -o -name "AndroidManifest*.tmpl*" \) 2>/dev/null > /tmp/manifest_list.txt
+                  while IFS= read -r mf; do
+                      inject_manifest "$mf"
+                  done < /tmp/manifest_list.txt
+              done
+
+              # buildozer dist 目录的 manifest
+              for DIST_DIR in \
+                "$HOME/.buildozer/android/platform/build-arm64-v8a/dists" \
+                "$GITHUB_WORKSPACE/.buildozer/android/platform/build-arm64-v8a/dists" ; do
+                  [ -d "$DIST_DIR" ] || continue
+                  find "$DIST_DIR" -type f -name "AndroidManifest*.xml" 2>/dev/null > /tmp/manifest_list2.txt
+                  while IFS= read -r mf; do
+                      inject_manifest "$mf"
+                  done < /tmp/manifest_list2.txt
+              done
+
+              sleep 1
+          done
+          PATCHER_EOF
+
+          chmod +x "$PATCHER_SCRIPT"
+
+          nohup "$PATCHER_SCRIPT" > /dev/null 2>&1 &
           echo "$!" > /tmp/patcher.pid
-          sleep 2
-          echo "=== Patcher 启动日志 ==="
+          echo "Patcher PID: $(cat /tmp/patcher.pid)"
+
+          sleep 3
+          echo "======== Patcher 启动日志 ========"
           cat /tmp/patcher.log || true
 
+      # ============================================================
+      # 运行 deploy
+      # ============================================================
       - name: Run pyside6-android-deploy
-        if: always()
         run: |
+          set -o pipefail
           source $HOME/venv/bin/activate
+
+          echo "======== 环境检查 ========"
+          echo "VIRTUAL_ENV=$VIRTUAL_ENV"
+          which python
+          which pyside6-android-deploy
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+          pip show PySide6 | grep -E "Version|Location" || true
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "将传入 --ndk-path: $ANDROID_NDK_HOME"
+
           WHEEL_PYSIDE="wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
           WHEEL_SHIBOKEN="wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
+          ls -lh "$WHEEL_PYSIDE" "$WHEEL_SHIBOKEN"
 
           set +e
           pyside6-android-deploy \
@@ -316,74 +463,159 @@ jobs:
             --wheel-shiboken "$WHEEL_SHIBOKEN" \
             --ndk-path "$ANDROID_NDK_HOME" \
             --sdk-path "$ANDROID_HOME" \
-            > /tmp/deploy_raw.log 2>&1
-          EXIT_CODE=$?
+            2>&1 | tee build.log
+          EXIT_CODE=${PIPESTATUS[0]}
           set -e
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/deploy_raw.log > "$GITHUB_WORKSPACE/build.log"
-          echo "退出码: $EXIT_CODE"
+          echo "pyside6-android-deploy 退出码: $EXIT_CODE"
+          exit $EXIT_CODE
 
-      - name: Stop patcher
+      # ============================================================
+      # 运行后诊断（经验 12：find 加 || true）
+      # ============================================================
+      - name: Post-deploy diagnostics
         if: always()
         run: |
-          [ -f /tmp/patcher.pid ] && kill "$(cat /tmp/patcher.pid)" 2>/dev/null || true
-          cat /tmp/patcher.log || true
+          set +e
 
-      - name: Diagnostics
-        if: always()
-        run: |
-          if [ ! -f "$GITHUB_WORKSPACE/build.log" ]; then
-            echo "无 build.log"; exit 0
+          echo "======== Patcher 日志 ========"
+          cat /tmp/patcher.log || echo "无 patcher 日志"
+
+          echo "======== deploy 后：位置 A recipe ========"
+          grep -nE "^[[:space:]]*version[[:space:]]*=" "$GITHUB_WORKSPACE/python-for-android/pythonforandroid/recipes/python3/__init__.py" 2>/dev/null || echo "位置 A 不存在"
+
+          echo "======== deploy 后：位置 B recipe ========"
+          grep -nE "^[[:space:]]*version[[:space:]]*=" "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android/pythonforandroid/recipes/python3/__init__.py" 2>/dev/null || echo "位置 B 不存在"
+
+          echo "======== 查找所有 python-for-android 目录 ========"
+          find / -type d -name "python-for-android" 2>/dev/null | head -20 || true
+
+          echo "======== 查找所有 libpython3.14.so ========"
+          find / -name "libpython3.14.so" 2>/dev/null | head -20 || true
+
+          echo "======== 查找所有 libpython3.11.so ========"
+          find / -name "libpython3.11.so" 2>/dev/null | head -20 || true
+
+          echo "======== 查找所有 AndroidManifest 模板 ========"
+          find / -name "AndroidManifest*.xml" 2>/dev/null | head -40 || true
+
+          echo "======== 检查 manifest 里的 MANAGE_EXTERNAL_STORAGE ========"
+          for mf in $(find / -name "AndroidManifest*.xml" 2>/dev/null | head -40); do
+            if grep -q "MANAGE_EXTERNAL_STORAGE" "$mf" 2>/dev/null; then
+              echo "✅ $mf 包含权限声明"
+            fi
+          done
+
+          if [ -f "$GITHUB_WORKSPACE/build.log" ]; then
+            echo "======== build.log 中 p4a 相关行 ========"
+            grep -nE "python-for-android|p4a|buildozer|Cloning|3\.14|3\.11|MANAGE_EXTERNAL" "$GITHUB_WORKSPACE/build.log" | head -80 || true
+
+            echo "======== build.log 末尾 50 行 ========"
+            tail -50 "$GITHUB_WORKSPACE/build.log" || true
           fi
 
-          echo "=== 1. [p4a-fix] ==="
-          grep -n "p4a-fix" "$GITHUB_WORKSPACE/build.log" | tail -5 || echo "无"
-
-          echo ""
-          echo "=== 2. Python 语法错误 ==="
-          grep -nE 'SyntaxError|IndentationError' "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "无"
-
-          echo ""
-          echo "=== 3. Java 编译错误 ==="
-          grep -nE 'error: |cannot find symbol' "$GITHUB_WORKSPACE/build.log" | grep -v "grpmodule" | grep -v "implicit-function-declaration" | tail -10 || echo "无"
-
-          echo ""
-          echo "=== 4. Buildozer failed 之前 100 行 ==="
-          FAIL_LINE=$(grep -n "Buildozer failed to execute" "$GITHUB_WORKSPACE/build.log" | head -1 | cut -d: -f1)
-          if [ -n "$FAIL_LINE" ]; then
-            START=$((FAIL_LINE - 100))
-            [ "$START" -lt 1 ] && START=1
-            sed -n "${START},${FAIL_LINE}p" "$GITHUB_WORKSPACE/build.log"
-          else
-            echo "未找到 Buildozer failed 标记"
-          fi
-
-      - name: Collect APK
+      # ============================================================
+      # 停止 patcher
+      # ============================================================
+      - name: Stop background p4a patcher
         if: always()
         run: |
+          if [ -f /tmp/patcher.pid ]; then
+            PID=$(cat /tmp/patcher.pid)
+            kill "$PID" 2>/dev/null || true
+            echo "已停止 Patcher PID: $PID"
+          fi
+          echo "======== 最终 Patcher 日志 ========"
+          cat /tmp/patcher.log || echo "无 patcher 日志"
+
+      # ============================================================
+      # 收集 APK（经验 12）
+      # ============================================================
+      - name: Collect APK artifacts
+        if: always()
+        run: |
+          set +e
           mkdir -p dist
-          find /home/runner -type f -name "*.apk" 2>/dev/null | tee /tmp/apk_list.txt || true
-          if [ -s /tmp/apk_list.txt ]; then
-            while IFS= read -r apk; do
-              case "$apk" in
-                */android/sdk/*) continue ;;
-                */cmdline-tools/*) continue ;;
-                */ndk/*) continue ;;
-              esac
-              cp "$apk" dist/ 2>/dev/null && echo "复制: $apk"
-            done < /tmp/apk_list.txt
-          fi
-          ls -lh dist/ 2>/dev/null || echo "dist/ 为空"
+          find . -type f -name "*.apk" \
+            -not -path "./dist/*" \
+            -not -path "./.buildozer/*" \
+            -not -path "./python-for-android/*" \
+            -exec cp {} dist/ \; 2>/dev/null || true
+          echo "=== dist/ 目录内容 ==="
+          ls -lh dist/ || echo "dist/ 目录为空"
 
-      - name: Upload APK
+      - name: List project root files for debugging
         if: always()
+        run: |
+          set +e
+          echo "=== 项目根目录文件清单 ==="
+          ls -la
+          echo "=== 查找所有 APK 文件 ==="
+          find . -type f -name "*.apk" 2>/dev/null || echo "未找到任何 APK 文件"
+
+      # ============================================================
+      # 验证 APK 内容（经验 17：日志不可信，以产物为准）
+      # ============================================================
+      - name: Verify APK contents
+        if: always()
+        run: |
+          set +e
+          APK=$(find dist -name "*.apk" | head -1)
+          if [ -z "$APK" ]; then
+            echo "没有找到 APK，跳过验证"
+            exit 0
+          fi
+          echo "检查 APK: $APK"
+          echo "=== lib/arm64-v8a/ 中的 libpython 和 libshiboken ==="
+          unzip -l "$APK" | grep -E "libpython|libshiboken|libc\+\+" || true
+
+          echo ""
+          echo "=== 关键判定：libpython 版本 ==="
+          if unzip -l "$APK" | grep -q "libpython3.11.so"; then
+            echo "✅ APK 中包含 libpython3.11.so"
+          elif unzip -l "$APK" | grep -q "libpython3.14.so"; then
+            echo "❌ APK 中仍然是 libpython3.14.so —— p4a 补丁没有生效"
+          else
+            echo "❌ APK 中没有任何 libpython3.x.so"
+          fi
+
+          echo ""
+          echo "=== 关键判定：MANAGE_EXTERNAL_STORAGE 权限 ==="
+          AAPT2=$(find "$ANDROID_HOME/build-tools" -name "aapt2" 2>/dev/null | head -1)
+          if [ -n "$AAPT2" ]; then
+            echo "使用 aapt2 检查权限..."
+            "$AAPT2" dump permissions "$APK" 2>/dev/null | grep -i "MANAGE_EXTERNAL_STORAGE" && \
+              echo "✅ aapt2 确认权限已注入" || \
+              echo "❌ aapt2 未发现 MANAGE_EXTERNAL_STORAGE"
+          else
+            echo "未找到 aapt2，改用 strings 检查..."
+            unzip -p "$APK" AndroidManifest.xml 2>/dev/null | strings | grep -i "MANAGE_EXTERNAL_STORAGE" && \
+              echo "✅ strings 确认权限已注入" || \
+              echo "❌ strings 未发现 MANAGE_EXTERNAL_STORAGE"
+          fi
+
+          echo ""
+          echo "=== 检查 libc++_shared.so 是否包含 std::pmr 符号 ==="
+          mkdir -p /tmp/apkcheck
+          unzip -o "$APK" "lib/arm64-v8a/libc++_shared.so" -d /tmp/apkcheck 2>/dev/null || true
+          if [ -f /tmp/apkcheck/lib/arm64-v8a/libc++_shared.so ]; then
+            READELF=$(find "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin" -name "llvm-readelf" 2>/dev/null | head -1)
+            if [ -n "$READELF" ]; then
+              "$READELF" -sW /tmp/apkcheck/lib/arm64-v8a/libc++_shared.so | grep -i "monotonic_buffer_resource" && echo "✅ 找到 pmr 符号" || echo "❌ 未找到 pmr 符号"
+            fi
+          fi
+
+      # ============================================================
+      # 上传产物（经验 13：if-no-files-found 显式设置）
+      # ============================================================
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: quizassistant-apk-${{ github.sha }}
           path: dist/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
 
-      - name: Upload logs
+      - name: Upload build log and patcher log (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -391,8 +623,10 @@ jobs:
           path: |
             build.log
             /tmp/patcher.log
+            .buildozer/**/build.log
+            .buildozer/**/*.log
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 7
 
       - name: Create Release with APK
         if: startsWith(github.ref, 'refs/tags/v')
@@ -400,5 +634,7 @@ jobs:
         with:
           files: dist/*.apk
           generate_release_notes: true
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
