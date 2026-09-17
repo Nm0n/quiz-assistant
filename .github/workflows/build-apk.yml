@@ -1,15 +1,16 @@
 # .github/workflows/build-apk.yml
 #
-# 关键修复（本版）：
-#   - buildozer 会强制重新 clone p4a，覆盖所有预打的补丁
-#   - 因此改为「后台持续监控 + 实时重新打补丁」策略
-#   - 监控目标：python3 recipe / hostpython3 recipe / PythonActivity.java / 所有 bootstrap 的 AndroidManifest.tmpl.xml
-#   - 监控间隔 0.5 秒，一旦发现被覆盖立即打回
+# 核心修复：
+#   1. 阻止 buildozer 清空 .buildozer 后重新 clone p4a（p4a 放外部目录）
+#   2. 后台 patcher 用 heredoc 生成，保证 YAML 语法正确
+#   3. Java 静态块压成单行，规避 sed 多行转义问题
 #
 # 历史修复保留：
-#   - NDK 降级到 r26b
-#   - PythonActivity.java 提前加载 Qt6Core（解决 JNI_OnLoad SIGSEGV）
-#   - AndroidManifest 注入 MANAGE_EXTERNAL_STORAGE（解决存储权限）
+#   - NDK r26b
+#   - PythonActivity.java 提前加载 Qt6Core
+#   - AndroidManifest 注入 MANAGE_EXTERNAL_STORAGE
+#   - Create Release（tag 触发）
+#   - Verify APK（构建成功兜底）
 
 name: Build Android APK
 
@@ -159,182 +160,156 @@ jobs:
           echo "MD5=$MD5"
           echo "SHA256=$SHA256"
 
-      - name: Pre-clone p4a and initial patch
+      # ============================================================
+      # 预克隆 p4a 到 p4a_src（.buildozer 之外）
+      # buildozer 启动时会 rm -rf .buildozer，会删掉里面的 p4a
+      # 所以必须把 p4a 放在外面，并让 p4a.source_dir 指向它
+      # ============================================================
+      - name: Pre-clone p4a and patch
         run: |
           set -e
-          P4A_A="$GITHUB_WORKSPACE/python-for-android"
-          P4A_B="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android"
-          rm -rf "$P4A_A" "$GITHUB_WORKSPACE/.buildozer"
-          mkdir -p "$(dirname "$P4A_B")"
+          P4A_SRC="$GITHUB_WORKSPACE/p4a_src"
+          rm -rf "$P4A_SRC"
+          git clone -b develop --single-branch https://github.com/kivy/python-for-android.git "$P4A_SRC"
 
-          echo "======== Clone p4a ========"
-          git clone -b develop --single-branch https://github.com/kivy/python-for-android.git "$P4A_A"
-          cp -r "$P4A_A" "$P4A_B"
+          # ---- 1. python3 / hostpython3 recipe ----
+          for R in python3 hostpython3; do
+            RF="$P4A_SRC/pythonforandroid/recipes/$R/__init__.py"
+            [ -f "$RF" ] || continue
+            sed -i -E "s/^([[:space:]]*version[[:space:]]*=[[:space:]]*)['\"]3\.[0-9]+\.[0-9]+['\"]/\1'${TARGET_PYTHON}'/" "$RF"
+            sed -i -E "s/^([[:space:]]*md5sum[[:space:]]*=[[:space:]]*)['\"][a-fA-F0-9]+['\"]/\1'${PY_TARBALL_MD5}'/" "$RF"
+            sed -i -E "s/^([[:space:]]*sha256[[:space:]]*=[[:space:]]*)['\"][a-fA-F0-9]+['\"]/\1'${PY_TARBALL_SHA256}'/" "$RF"
+            sed -i -E "s|/3\.14\.[0-9]+/Python-3\.14\.[0-9]+\.tar\.xz|/${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz|g" "$RF"
+            echo "recipe patched: $RF"
+          done
 
-          echo "======== 初始打补丁（防御性）========"
-          for P4A in "$P4A_A" "$P4A_B"; do
-            # Python recipe
-            for R in python3 hostpython3; do
-              RF="$P4A/pythonforandroid/recipes/$R/__init__.py"
-              if [ -f "$RF" ]; then
-                sed -i -E "s/^([[:space:]]*version[[:space:]]*=[[:space:]]*)['\"]3\.[0-9]+\.[0-9]+['\"]/\1'${TARGET_PYTHON}'/" "$RF"
-                sed -i -E "s/^([[:space:]]*md5sum[[:space:]]*=[[:space:]]*)['\"][a-fA-F0-9]+['\"]/\1'${PY_TARBALL_MD5}'/" "$RF"
-                sed -i -E "s/^([[:space:]]*sha256[[:space:]]*=[[:space:]]*)['\"][a-fA-F0-9]+['\"]/\1'${PY_TARBALL_SHA256}'/" "$RF"
-                sed -i -E "s|/3\.14\.[0-9]+/Python-3\.14\.[0-9]+\.tar\.xz|/${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz|g" "$RF"
-              fi
-            done
+          # ---- 2. PythonActivity.java（单行静态块）----
+          find "$P4A_SRC/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r JF; do
+            if ! grep -q "loadQt6CoreFirst" "$JF"; then
+              sed -i '/^public class PythonActivity/a\
+          /* loadQt6CoreFirst */ static { try { String abi = android.os.Build.SUPPORTED_ABIS[0]; System.loadLibrary("Qt6Core_" + abi); } catch (Throwable t) { t.printStackTrace(); } }' "$JF"
+              echo "activity patched: $JF"
+            fi
+          done
 
-            # PythonActivity.java（所有 bootstrap）
-            find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while read -r JF; do
-              if [ -f "$JF" ] && ! grep -q "loadQt6CoreFirst" "$JF"; then
-                sed -i '/^public class PythonActivity/a\
-/* loadQt6CoreFirst */\
-static {\
-    try {\
-        String abi = android.os.Build.SUPPORTED_ABIS[0];\
-        System.loadLibrary("Qt6Core_" + abi);\
-    } catch (Throwable t) {\
-        t.printStackTrace();\
-    }\
-}' "$JF"
-              fi
-            done
-
-            # AndroidManifest.tmpl.xml（所有 bootstrap）
-            find "$P4A/pythonforandroid/bootstraps" -name "AndroidManifest.tmpl.xml" -type f 2>/dev/null | while read -r MF; do
-              if [ -f "$MF" ] && ! grep -q "MANAGE_EXTERNAL_STORAGE" "$MF"; then
-                awk '
-                  /<application/ && !done {
-                    print "    <uses-permission android:name=\"android.permission.MANAGE_EXTERNAL_STORAGE\" />";
-                    print "    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\" android:maxSdkVersion=\"32\" />";
-                    print "    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\" />";
-                    done=1
-                  }
-                  { print }
-                ' "$MF" > "${MF}.new" && mv "${MF}.new" "$MF"
-              fi
-            done
+          # ---- 3. AndroidManifest.tmpl.xml ----
+          find "$P4A_SRC/pythonforandroid/bootstraps" -name "AndroidManifest.tmpl.xml" -type f 2>/dev/null | while IFS= read -r MF; do
+            if ! grep -q "MANAGE_EXTERNAL_STORAGE" "$MF"; then
+              awk '
+                /<application/ && !done {
+                  print "    <uses-permission android:name=\"android.permission.MANAGE_EXTERNAL_STORAGE\" />";
+                  print "    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\" android:maxSdkVersion=\"32\" />";
+                  print "    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\" />";
+                  done=1
+                }
+                { print }
+              ' "$MF" > "${MF}.new" && mv "${MF}.new" "$MF"
+              echo "manifest patched: $MF"
+            fi
           done
 
           echo "======== 验证 ========"
-          grep -nE "version = " "$P4A_A/pythonforandroid/recipes/python3/__init__.py" | head -3
-          echo "--- MANAGE_EXTERNAL_STORAGE 数量 ---"
-          grep -rl "MANAGE_EXTERNAL_STORAGE" "$P4A_A/pythonforandroid/bootstraps" 2>/dev/null | head -5
-          echo "--- loadQt6CoreFirst 数量 ---"
-          grep -rl "loadQt6CoreFirst" "$P4A_A/pythonforandroid/bootstraps" 2>/dev/null | head -5
+          grep -nE "^[[:space:]]*version[[:space:]]*=" "$P4A_SRC/pythonforandroid/recipes/python3/__init__.py" | head -3
+          echo "--- manifest patched ---"
+          grep -rl "MANAGE_EXTERNAL_STORAGE" "$P4A_SRC/pythonforandroid/bootstraps" 2>/dev/null | head -5
+          echo "--- activity patched ---"
+          grep -rl "loadQt6CoreFirst" "$P4A_SRC/pythonforandroid/bootstraps" 2>/dev/null | head -5
 
-      - name: Patch buildozer default.spec
+      - name: Patch buildozer default.spec to use external p4a
         run: |
           source $HOME/venv/bin/activate
           DS="$VIRTUAL_ENV/lib/python3.11/site-packages/buildozer/default.spec"
-          P4A_B="$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android"
-          if grep -q "^p4a.source_dir" "$DS"; then
-            sed -i "s|^p4a.source_dir.*|p4a.source_dir = ${P4A_B}|" "$DS"
-          else
-            sed -i "/^\[buildozer\]/a p4a.source_dir = ${P4A_B}" "$DS"
-          fi
-          echo "=== default.spec [buildozer] 段 ==="
-          grep -A 10 "^\[buildozer\]" "$DS" || true
+          P4A_SRC="$GITHUB_WORKSPACE/p4a_src"
+          for f in "$DS" "$GITHUB_WORKSPACE/buildozer.spec"; do
+            [ -f "$f" ] || continue
+            if grep -q "^p4a.source_dir" "$f"; then
+              sed -i "s|^p4a.source_dir.*|p4a.source_dir = ${P4A_SRC}|" "$f"
+            else
+              sed -i "/^\[buildozer\]/a p4a.source_dir = ${P4A_SRC}" "$f"
+            fi
+            echo "=== $f ==="
+            grep -A 10 "^\[buildozer\]" "$f" || true
+          done
 
       - name: Clean p4a build cache
         run: |
-          PLATFORM_DIR="$GITHUB_WORKSPACE/.buildozer/android/platform"
-          find "$PLATFORM_DIR" -maxdepth 1 -type d -name "build-*" -exec rm -rf {} + 2>/dev/null || true
-          rm -rf "$PLATFORM_DIR/python-for-android/dists" 2>/dev/null || true
-          rm -rf "$PLATFORM_DIR/python-for-android/build" 2>/dev/null || true
-          rm -rf "$PLATFORM_DIR/python-for-android/.buildozer" 2>/dev/null || true
+          rm -rf "$GITHUB_WORKSPACE/.buildozer" 2>/dev/null || true
           echo "缓存清理完成"
 
       # ============================================================
-      # 【本版核心】后台持续监控 + 实时重新打补丁
-      #   buildozer 会强制重新 clone p4a，覆盖预打的补丁
-      #   监控脚本每 0.5 秒检测一次，发现被覆盖立即打回
+      # 后台 patcher：heredoc 生成，缩进一致，保证 YAML 合法
       # ============================================================
-      - name: Start background p4a patcher (watchdog mode)
+      - name: Start background p4a patcher
         run: |
-          PATCHER="$GITHUB_WORKSPACE/p4a_patcher.sh"
-          cat > "$PATCHER" <<'PATCHER_EOF'
-#!/bin/bash
-LOG="/tmp/patcher.log"
-PY="3.11.5"
-TARBALL="/tmp/Python-${PY}.tar.xz"
-if [ -f "$TARBALL" ]; then
-  MD5=$(md5sum "$TARBALL" | awk '{print $1}')
-  SHA256=$(sha256sum "$TARBALL" | awk '{print $1}')
-else
-  MD5=""
-  SHA256=""
-fi
-echo "[Patcher] start $(date), PY=$PY, MD5=$MD5, SHA256=$SHA256" > "$LOG"
+          cat > /tmp/patcher.sh << 'PATCHER_SCRIPT_EOF'
+          #!/bin/bash
+          LOG=/tmp/patcher.log
+          echo "[Patcher] start $(date)" > "$LOG"
+          TARGET_PY="$TARGET_PYTHON"
+          TARBALL="/tmp/Python-${TARGET_PY}.tar.xz"
+          if [ -f "$TARBALL" ]; then
+            MD5=$(md5sum "$TARBALL" | awk '{print $1}')
+            SHA256=$(sha256sum "$TARBALL" | awk '{print $1}')
+          else
+            MD5=""; SHA256=""
+          fi
 
-patch_recipe() {
-  local F="$1"
-  [ -f "$F" ] || return
-  if grep -qE "version = '3\.14\.|version = \"3\.14\." "$F"; then
-    sed -i -E "s/version = '3\.[0-9]+\.[0-9]+'/version = '$PY'/" "$F"
-    sed -i -E "s/version = \"3\.[0-9]+\.[0-9]+\"/version = '$PY'/" "$F"
-    [ -n "$MD5" ] && sed -i -E "s/md5sum = '[a-fA-F0-9]+'/md5sum = '$MD5'/" "$F"
-    [ -n "$SHA256" ] && sed -i -E "s/sha256 = '[a-fA-F0-9]+'/sha256 = '$SHA256'/" "$F"
-    echo "[Patcher] $(date) patched recipe: $F" >> "$LOG"
-  fi
-}
+          patch_recipe() {
+            local F="$1"
+            [ -f "$F" ] || return
+            grep -qE "version = .3\.14\." "$F" || return
+            sed -i -E "s/version = '3\.[0-9]+\.[0-9]+'/version = '$TARGET_PY'/" "$F"
+            sed -i -E "s/version = \"3\.[0-9]+\.[0-9]+\"/version = '$TARGET_PY'/" "$F"
+            [ -n "$MD5" ] && sed -i -E "s/md5sum = '[a-fA-F0-9]+'/md5sum = '$MD5'/" "$F"
+            [ -n "$SHA256" ] && sed -i -E "s/sha256 = '[a-fA-F0-9]+'/sha256 = '$SHA256'/" "$F"
+            echo "[Patcher] $(date) recipe: $F" >> "$LOG"
+          }
 
-patch_activity() {
-  local F="$1"
-  [ -f "$F" ] || return
-  grep -q "loadQt6CoreFirst" "$F" && return
-  sed -i '/^public class PythonActivity/a\
-/* loadQt6CoreFirst */\
-static {\
-    try {\
-        String abi = android.os.Build.SUPPORTED_ABIS[0];\
-        System.loadLibrary("Qt6Core_" + abi);\
-    } catch (Throwable t) {\
-        t.printStackTrace();\
-    }\
-}' "$F"
-  echo "[Patcher] $(date) patched activity: $F" >> "$LOG"
-}
+          patch_activity() {
+            local F="$1"
+            [ -f "$F" ] || return
+            grep -q "loadQt6CoreFirst" "$F" && return
+            sed -i '/^public class PythonActivity/a\
+          /* loadQt6CoreFirst */ static { try { String abi = android.os.Build.SUPPORTED_ABIS[0]; System.loadLibrary("Qt6Core_" + abi); } catch (Throwable t) { t.printStackTrace(); } }' "$F"
+            echo "[Patcher] $(date) activity: $F" >> "$LOG"
+          }
 
-patch_manifest() {
-  local F="$1"
-  [ -f "$F" ] || return
-  grep -q "MANAGE_EXTERNAL_STORAGE" "$F" && return
-  awk '
-    /<application/ && !done {
-      print "    <uses-permission android:name=\"android.permission.MANAGE_EXTERNAL_STORAGE\" />";
-      print "    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\" android:maxSdkVersion=\"32\" />";
-      print "    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\" />";
-      done=1
-    }
-    { print }
-  ' "$F" > "${F}.new" && mv "${F}.new" "$F"
-  echo "[Patcher] $(date) patched manifest: $F" >> "$LOG"
-}
+          patch_manifest() {
+            local F="$1"
+            [ -f "$F" ] || return
+            grep -q "MANAGE_EXTERNAL_STORAGE" "$F" && return
+            awk '
+              /<application/ && !done {
+                print "    <uses-permission android:name=\"android.permission.MANAGE_EXTERNAL_STORAGE\" />";
+                print "    <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\" android:maxSdkVersion=\"32\" />";
+                print "    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\" />";
+                done=1
+              }
+              { print }
+            ' "$F" > "${F}.new" && mv "${F}.new" "$F"
+            echo "[Patcher] $(date) manifest: $F" >> "$LOG"
+          }
 
-while true; do
-  for P4A_DIR in \
-    "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" \
-    "$GITHUB_WORKSPACE/python-for-android" \
-    "$HOME/.buildozer/android/platform/python-for-android" ; do
-    [ -d "$P4A_DIR" ] || continue
-
-    patch_recipe "$P4A_DIR/pythonforandroid/recipes/python3/__init__.py"
-    patch_recipe "$P4A_DIR/pythonforandroid/recipes/hostpython3/__init__.py"
-
-    find "$P4A_DIR/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r F; do
-      patch_activity "$F"
-    done
-
-    find "$P4A_DIR/pythonforandroid/bootstraps" -name "AndroidManifest.tmpl.xml" -type f 2>/dev/null | while IFS= read -r F; do
-      patch_manifest "$F"
-    done
-  done
-  sleep 0.5
-done
-PATCHER_EOF
-          chmod +x "$PATCHER"
-          nohup "$PATCHER" > /dev/null 2>&1 &
+          while true; do
+            for P4A in \
+              "$GITHUB_WORKSPACE/p4a_src" \
+              "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" \
+              "$HOME/.buildozer/android/platform/python-for-android"; do
+              [ -d "$P4A" ] || continue
+              patch_recipe "$P4A/pythonforandroid/recipes/python3/__init__.py"
+              patch_recipe "$P4A/pythonforandroid/recipes/hostpython3/__init__.py"
+              find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r F; do
+                patch_activity "$F"
+              done
+              find "$P4A/pythonforandroid/bootstraps" -name "AndroidManifest.tmpl.xml" -type f 2>/dev/null | while IFS= read -r F; do
+                patch_manifest "$F"
+              done
+            done
+            sleep 1
+          done
+          PATCHER_SCRIPT_EOF
+          chmod +x /tmp/patcher.sh
+          nohup /tmp/patcher.sh > /dev/null 2>&1 &
           echo "$!" > /tmp/patcher.pid
           echo "Patcher PID: $(cat /tmp/patcher.pid)"
           sleep 2
@@ -345,11 +320,11 @@ PATCHER_EOF
         run: |
           set -o pipefail
           source $HOME/venv/bin/activate
-
           WHEEL_PYSIDE="wheels/PySide6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
           WHEEL_SHIBOKEN="wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
           ls -lh "$WHEEL_PYSIDE" "$WHEEL_SHIBOKEN"
-
+          echo "=== 运行前：p4a.source_dir 检查 ==="
+          grep "p4a.source_dir" "$VIRTUAL_ENV/lib/python3.11/site-packages/buildozer/default.spec" || true
           set +e
           pyside6-android-deploy \
             --config-file pysidedeploy.spec \
@@ -378,19 +353,10 @@ PATCHER_EOF
         run: |
           echo "=== build.log 末尾 80 行 ==="
           [ -f "$GITHUB_WORKSPACE/build.log" ] && tail -80 "$GITHUB_WORKSPACE/build.log" || echo "无 build.log"
-
           echo ""
-          echo "=== 最终检查补丁状态 ==="
-          for P4A_DIR in \
-              "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" \
-              "$GITHUB_WORKSPACE/python-for-android" ; do
-            echo "---- $P4A_DIR ----"
-            if [ -d "$P4A_DIR" ]; then
-              grep -nE "^[[:space:]]*version[[:space:]]*=" "$P4A_DIR/pythonforandroid/recipes/python3/__init__.py" 2>/dev/null || echo "recipe 不存在"
-              grep -rl "MANAGE_EXTERNAL_STORAGE" "$P4A_DIR/pythonforandroid/bootstraps" 2>/dev/null | head -3 || echo "manifest 未打补丁"
-              grep -rl "loadQt6CoreFirst" "$P4A_DIR/pythonforandroid/bootstraps" 2>/dev/null | head -3 || echo "PythonActivity 未打补丁"
-            fi
-          done
+          echo "=== 搜索错误关键词 ==="
+          [ -f "$GITHUB_WORKSPACE/build.log" ] && \
+            grep -nE "error|Error|ERROR|failed|Failed|FAILED|Traceback" "$GITHUB_WORKSPACE/build.log" | head -30 || echo "无 build.log"
 
       - name: Collect APK
         if: always()
@@ -399,10 +365,34 @@ PATCHER_EOF
           find . -type f -name "*.apk" \
             -not -path "./dist/*" \
             -not -path "./.buildozer/*" \
-            -not -path "./python-for-android/*" \
+            -not -path "./p4a_src/*" \
             -exec cp {} dist/ \; 2>/dev/null || true
           echo "=== dist/ 内容 ==="
           ls -lh dist/ || echo "dist/ 为空"
+
+      # ============================================================
+      # 验证 APK 内容（构建成功的兜底诊断）
+      # ============================================================
+      - name: Verify APK contents
+        if: always()
+        run: |
+          APK=$(find dist -name "*.apk" | head -1)
+          if [ -z "$APK" ]; then
+            echo "没有找到 APK，跳过验证"
+            exit 0
+          fi
+          echo "检查 APK: $APK"
+          echo "=== 关键库文件 ==="
+          unzip -l "$APK" | grep -E "libpython|libshiboken|libQt6Core|libQt6Quick" || true
+          echo ""
+          echo "=== 关键判定 ==="
+          if unzip -l "$APK" | grep -q "libpython3.11.so"; then
+            echo "✅ 包含 libpython3.11.so"
+          elif unzip -l "$APK" | grep -q "libpython3.14.so"; then
+            echo "❌ 仍是 libpython3.14.so —— p4a 补丁没生效"
+          else
+            echo "❌ 没有任何 libpython3.x.so"
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -422,3 +412,17 @@ PATCHER_EOF
             /tmp/patcher.log
           if-no-files-found: warn
           retention-days: 7
+
+      # ============================================================
+      # 打 tag 时自动创建 GitHub Release
+      # ============================================================
+      - name: Create Release with APK
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.apk
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
