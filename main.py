@@ -1,10 +1,9 @@
 # main.py
 # 移动端 / 跨平台入口：加载 QML，注册桥接对象，启动应用。
 #
-# 文件加载策略：
-#   - Android：应用内文件浏览器，扫描 /storage/emulated/0/Download/quizassistant/
-#              需要 MANAGE_EXTERNAL_STORAGE 权限（首次使用引导用户开启）
-#   - 桌面：走 QML FileDialog
+# 平台检测说明：
+#   PySide6 的 Android 打包环境下 sys.platform == "linux"，
+#   所以不能用 sys.platform == "android" 判断。改用 jnius 是否可导入。
 
 import io
 import os
@@ -23,8 +22,29 @@ from core.utils import map_judgment
 
 QQuickStyle.setStyle("Basic")
 
-# 公共扫描目录（Android）
+# 公共扫描目录（Android 共享存储）
 ANDROID_WATCH_DIR = "/storage/emulated/0/Download/quizassistant"
+
+
+# ==================================================================
+# 平台检测（全局缓存，只算一次）
+# ==================================================================
+_ANDROID_CACHE = None
+
+def _is_android():
+    """
+    判断当前是否运行在 p4a / PySide6 Android 环境。
+    PySide6 的 Android 打包下 sys.platform 是 "linux"，因此不能靠它判断；
+    改为尝试 import jnius —— p4a 环境一定带 jnius，桌面端一定没有。
+    """
+    global _ANDROID_CACHE
+    if _ANDROID_CACHE is None:
+        try:
+            import jnius  # noqa: F401
+            _ANDROID_CACHE = True
+        except ImportError:
+            _ANDROID_CACHE = False
+    return _ANDROID_CACHE
 
 
 class ControllerBridge(QObject):
@@ -46,19 +66,21 @@ class ControllerBridge(QObject):
     # ==============================================================
     @Property(bool, constant=True)
     def isAndroid(self):
-        return sys.platform == "android"
+        return _is_android()
 
     # ==============================================================
     # 存储权限（Android 11+ MANAGE_EXTERNAL_STORAGE）
     # ==============================================================
     @Slot(result=bool)
     def hasStoragePermission(self):
-        if sys.platform != "android":
+        if not _is_android():
             return True
         try:
             from jnius import autoclass
             Environment = autoclass("android.os.Environment")
-            return bool(Environment.isExternalStorageManager())
+            result = bool(Environment.isExternalStorageManager())
+            print("[hasStoragePermission] isExternalStorageManager = {}".format(result))
+            return result
         except Exception as e:
             print("[hasStoragePermission] failed: {}".format(e))
             return False
@@ -66,7 +88,7 @@ class ControllerBridge(QObject):
     @Slot()
     def openStoragePermissionSettings(self):
         """跳转到本应用的「所有文件访问」权限设置页"""
-        if sys.platform != "android":
+        if not _is_android():
             return
         try:
             from jnius import autoclass
@@ -86,7 +108,7 @@ class ControllerBridge(QObject):
             print("[openStoragePermissionSettings] failed: {}".format(e))
             self.errorOccurred.emit(
                 "无法打开权限设置页，请手动前往：\n"
-                "系统设置 → 应用 → 智能刷题助手 → 权限 → 所有文件访问"
+                "系统设置 → 应用 → 应用管理 → 智能刷题助手 → 权限 → 所有文件访问"
             )
 
     @Slot(result=bool)
@@ -96,7 +118,9 @@ class ControllerBridge(QObject):
             target = self._get_watch_dir()
             if not os.path.exists(target):
                 os.makedirs(target, exist_ok=True)
-            return os.path.isdir(target)
+            ok = os.path.isdir(target)
+            print("[ensureWatchDir] target={} ok={}".format(target, ok))
+            return ok
         except Exception as e:
             print("[ensureWatchDir] failed: {}".format(e))
             return False
@@ -110,12 +134,15 @@ class ControllerBridge(QObject):
         Android: /storage/emulated/0/Download/quizassistant/
         桌面:   <项目根>/data/
         """
-        if sys.platform == "android":
+        if _is_android():
             return ANDROID_WATCH_DIR
         else:
             base = os.path.dirname(os.path.abspath(__file__))
             path = os.path.join(base, "data")
-            os.makedirs(path, exist_ok=True)
+            try:
+                os.makedirs(path, exist_ok=True)
+            except Exception:
+                pass
             return path
 
     @Slot(result=str)
@@ -185,7 +212,7 @@ class ControllerBridge(QObject):
             return (raw, raw) if os.path.exists(raw) else (None, None)
 
         if raw.startswith("content://"):
-            if sys.platform != "android":
+            if not _is_android():
                 return None, None
             try:
                 data = ControllerBridge._read_android_uri(raw)
@@ -222,7 +249,7 @@ class ControllerBridge(QObject):
             return
 
         if raw.startswith("content://"):
-            if sys.platform != "android":
+            if not _is_android():
                 yield None, None
                 return
             writer = None
@@ -397,7 +424,7 @@ class ControllerBridge(QObject):
 
     @Slot(str, result=int)
     def loadFromExcel(self, raw):
-        if sys.platform == "android":
+        if _is_android():
             self.errorOccurred.emit("Android 端不支持 Excel 导入，请使用 JSON 格式的题库。")
             return 0
 
@@ -582,7 +609,7 @@ def _qml_candidates():
     candidates.append(os.path.join(base, "..", "qml", "main.qml"))
     candidates.append(os.path.join(os.getcwd(), "qml", "main.qml"))
 
-    if sys.platform == "android":
+    if _is_android():
         try:
             from android import mActivity  # type: ignore
             ctx = mActivity.getApplicationContext()
@@ -599,6 +626,12 @@ def main():
     app = QGuiApplication(sys.argv)
     app.setApplicationName("智能刷题助手")
     app.setOrganizationName("QuizAssistant")
+
+    # 启动时打印平台检测结果，方便日志排查
+    print("[main] _is_android() = {}".format(_is_android()))
+    print("[main] sys.platform = {}".format(sys.platform))
+    if _is_android():
+        print("[main] watch_dir = {}".format(ANDROID_WATCH_DIR))
 
     engine = QQmlApplicationEngine()
     bridge = ControllerBridge()
