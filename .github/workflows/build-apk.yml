@@ -143,8 +143,106 @@ jobs:
           echo "PY_TARBALL_SHA256=$SHA256" >> "$GITHUB_ENV"
 
       # ============================================================
-      # 预克隆 p4a + 初始补丁
-      # Java 补丁回到 V2 简单版：静态块 + 单层反射 setActivity
+      # 创建补丁模板文件（避免嵌套转义）
+      #   /tmp/p4a_hook.txt       —— Python recipe hook
+      #   /tmp/patch_activity.awk —— Java 补丁 awk 脚本
+      #   /tmp/patcher.sh         —— 后台监控脚本
+      # ============================================================
+      - name: Create patch template files
+        run: |
+          # ---------- 1. /tmp/p4a_hook.txt ----------
+          : > /tmp/p4a_hook.txt
+          echo '' >> /tmp/p4a_hook.txt
+          echo '# ===== Android Python 3.11.5 fix =====' >> /tmp/p4a_hook.txt
+          echo 'import os as _p4a_os' >> /tmp/p4a_hook.txt
+          echo 'import subprocess as _p4a_sp' >> /tmp/p4a_hook.txt
+          echo '' >> /tmp/p4a_hook.txt
+          echo "_p4a_orig_prebuild = getattr(Python3Recipe, 'prebuild_arch', None)" >> /tmp/p4a_hook.txt
+          echo '' >> /tmp/p4a_hook.txt
+          echo 'def _p4a_android_prebuild(self, arch):' >> /tmp/p4a_hook.txt
+          echo '    if _p4a_orig_prebuild is not None:' >> /tmp/p4a_hook.txt
+          echo '        _p4a_orig_prebuild(self, arch)' >> /tmp/p4a_hook.txt
+          echo '    try:' >> /tmp/p4a_hook.txt
+          echo '        bd = self.get_build_dir(arch.arch)' >> /tmp/p4a_hook.txt
+          echo "        cfg = _p4a_os.path.join(bd, 'configure')" >> /tmp/p4a_hook.txt
+          echo '        if _p4a_os.path.exists(cfg):' >> /tmp/p4a_hook.txt
+          echo "            _p4a_sp.call(['sed', '-i', 's/-Werror=implicit-function-declaration//g', cfg])" >> /tmp/p4a_hook.txt
+          echo "            print('[p4a-fix] patched configure: ' + cfg)" >> /tmp/p4a_hook.txt
+          echo '    except Exception as e:' >> /tmp/p4a_hook.txt
+          echo "        print('[p4a-fix] failed: ' + str(e))" >> /tmp/p4a_hook.txt
+          echo '' >> /tmp/p4a_hook.txt
+          echo 'Python3Recipe.prebuild_arch = _p4a_android_prebuild' >> /tmp/p4a_hook.txt
+
+          echo "===== /tmp/p4a_hook.txt 内容 ====="
+          cat /tmp/p4a_hook.txt
+
+          # ---------- 2. /tmp/patch_activity.awk ----------
+          : > /tmp/patch_activity.awk
+          echo '/^public class PythonActivity/ {' >> /tmp/patch_activity.awk
+          echo '    print;' >> /tmp/patch_activity.awk
+          echo '    print "    /* _p4a_activity_patched */";' >> /tmp/patch_activity.awk
+          echo '    print "    static {";' >> /tmp/patch_activity.awk
+          echo '    print "        try {";' >> /tmp/patch_activity.awk
+          echo '    print "            System.loadLibrary(\"Qt6Core_\" + android.os.Build.SUPPORTED_ABIS[0]);";' >> /tmp/patch_activity.awk
+          echo '    print "        } catch (Throwable ignored) {}";' >> /tmp/patch_activity.awk
+          echo '    print "    }";' >> /tmp/patch_activity.awk
+          echo '    next;' >> /tmp/patch_activity.awk
+          echo '}' >> /tmp/patch_activity.awk
+          echo '/onCreate\(Bundle/ {' >> /tmp/patch_activity.awk
+          echo '    print;' >> /tmp/patch_activity.awk
+          echo '    print "        /* _p4a_activity_patched */";' >> /tmp/patch_activity.awk
+          echo '    print "        try {";' >> /tmp/patch_activity.awk
+          echo '    print "            Class<?> _qtNative = Class.forName(\"org.qtproject.qt.android.QtNative\");";' >> /tmp/patch_activity.awk
+          echo '    print "            java.lang.reflect.Method _setAct = _qtNative.getDeclaredMethod(\"setActivity\", android.app.Activity.class);";' >> /tmp/patch_activity.awk
+          echo '    print "            _setAct.setAccessible(true);";' >> /tmp/patch_activity.awk
+          echo '    print "            _setAct.invoke(null, this);";' >> /tmp/patch_activity.awk
+          echo '    print "        } catch (Throwable ignored) {}";' >> /tmp/patch_activity.awk
+          echo '    next;' >> /tmp/patch_activity.awk
+          echo '}' >> /tmp/patch_activity.awk
+          echo '{ print }' >> /tmp/patch_activity.awk
+
+          echo "===== /tmp/patch_activity.awk 内容 ====="
+          cat /tmp/patch_activity.awk
+
+          # ---------- 3. /tmp/patcher.sh ----------
+          : > /tmp/patcher.sh
+          echo '#!/bin/bash' >> /tmp/patcher.sh
+          echo 'LOG=/tmp/patcher.log' >> /tmp/patcher.sh
+          echo 'echo "start $(date)" > $LOG' >> /tmp/patcher.sh
+          echo 'TARGET_PY="$TARGET_PYTHON"' >> /tmp/patcher.sh
+          echo 'TARBALL="/tmp/Python-${TARGET_PY}.tar.xz"' >> /tmp/patcher.sh
+          echo 'if [ -f "$TARBALL" ]; then MD5=$(md5sum "$TARBALL" | awk "{print \$1}"); SHA256=$(sha256sum "$TARBALL" | awk "{print \$1}"); else MD5=""; SHA256=""; fi' >> /tmp/patcher.sh
+          echo 'while true; do' >> /tmp/patcher.sh
+          echo '  for P4A in "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" "$HOME/.buildozer/android/platform/python-for-android"; do' >> /tmp/patcher.sh
+          echo '    [ -d "$P4A" ] || continue' >> /tmp/patcher.sh
+          echo '    for R in python3 hostpython3; do' >> /tmp/patcher.sh
+          echo '      F="$P4A/pythonforandroid/recipes/$R/__init__.py"' >> /tmp/patcher.sh
+          echo '      if [ -f "$F" ] && grep -qE "version = .3\.14\." "$F"; then' >> /tmp/patcher.sh
+          echo '        sed -i -E "s/version = .3\.[0-9]+\.[0-9]+./version = \"$TARGET_PY\"/" "$F"' >> /tmp/patcher.sh
+          echo '        echo "$(date) recipe $F" >> $LOG' >> /tmp/patcher.sh
+          echo '      fi' >> /tmp/patcher.sh
+          echo '    done' >> /tmp/patcher.sh
+          echo '    P3="$P4A/pythonforandroid/recipes/python3/__init__.py"' >> /tmp/patcher.sh
+          echo '    if [ -f "$P3" ] && ! grep -q "_p4a_android_prebuild" "$P3"; then' >> /tmp/patcher.sh
+          echo '      cat /tmp/p4a_hook.txt >> "$P3"' >> /tmp/patcher.sh
+          echo '      echo "$(date) hook appended to $P3" >> $LOG' >> /tmp/patcher.sh
+          echo '    fi' >> /tmp/patcher.sh
+          echo '    find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r F; do' >> /tmp/patcher.sh
+          echo '      if ! grep -q "_p4a_activity_patched" "$F"; then' >> /tmp/patcher.sh
+          echo '        awk -f /tmp/patch_activity.awk "$F" > "$F.new" && mv "$F.new" "$F"' >> /tmp/patcher.sh
+          echo '        echo "$(date) activity $F" >> $LOG' >> /tmp/patcher.sh
+          echo '      fi' >> /tmp/patcher.sh
+          echo '    done' >> /tmp/patcher.sh
+          echo '  done' >> /tmp/patcher.sh
+          echo '  sleep 1' >> /tmp/patcher.sh
+          echo 'done' >> /tmp/patcher.sh
+          chmod +x /tmp/patcher.sh
+
+          echo "===== /tmp/patcher.sh 内容 ====="
+          cat /tmp/patcher.sh
+
+      # ============================================================
+      # 预克隆 p4a + 初始补丁（用模板文件）
       # ============================================================
       - name: Pre-clone p4a and patch
         run: |
@@ -164,72 +262,23 @@ jobs:
             sed -i -E "s|/3\.14\.[0-9]+/Python-3\.14\.[0-9]+\.tar\.xz|/${TARGET_PYTHON}/Python-${TARGET_PYTHON}.tar.xz|g" "$RF"
           done
 
-          # ---- 2. PythonActivity.java 补丁（简单版）----
-          echo "===== 查找 PythonActivity.java ====="
-          find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null > /tmp/java_files.txt || true
-          cat /tmp/java_files.txt
-
-          while IFS= read -r JF; do
-            [ -n "$JF" ] || continue
-            echo "### 处理: $JF"
-            if grep -q "_p4a_activity_patched" "$JF"; then
-              echo "已打过补丁，跳过"
-              continue
-            fi
-
-            awk '
-            /^public class PythonActivity/ {
-                print;
-                print "    /* _p4a_activity_patched */";
-                print "    static {";
-                print "        try {";
-                print "            System.loadLibrary(\"Qt6Core_\" + android.os.Build.SUPPORTED_ABIS[0]);";
-                print "        } catch (Throwable ignored) {}";
-                print "    }";
-                next;
-            }
-            /onCreate\(Bundle/ {
-                print;
-                print "        /* _p4a_activity_patched */";
-                print "        try {";
-                print "            Class<?> _qtNative = Class.forName(\"org.qtproject.qt.android.QtNative\");";
-                print "            java.lang.reflect.Method _setAct = _qtNative.getDeclaredMethod(\"setActivity\", android.app.Activity.class);";
-                print "            _setAct.setAccessible(true);";
-                print "            _setAct.invoke(null, this);";
-                print "        } catch (Throwable ignored) {}";
-                next;
-            }
-            { print }
-            ' "$JF" > "$JF.new" && mv "$JF.new" "$JF"
-
-            echo "--- 修改后前 40 行 ---"
-            head -40 "$JF"
-            echo "=== 大括号计数 ==="
-            echo "  open:  $(grep -o '{' "$JF" | wc -l)"
-            echo "  close: $(grep -o '}' "$JF" | wc -l)"
-          done < /tmp/java_files.txt
-
-          # ---- 3. python3 recipe prebuild hook ----
+          # ---- 2. python3 recipe hook（从模板文件追加）----
           P3_RECIPE="$P4A/pythonforandroid/recipes/python3/__init__.py"
           if ! grep -q "_p4a_android_prebuild" "$P3_RECIPE"; then
-            echo "" >> "$P3_RECIPE"
-            echo "# ===== Android Python 3.11.5 fix =====" >> "$P3_RECIPE"
-            echo "import os as _p4a_os" >> "$P3_RECIPE"
-            echo "import subprocess as _p4a_sp" >> "$P3_RECIPE"
-            echo "_p4a_orig_prebuild = getattr(Python3Recipe, 'prebuild_arch', None)" >> "$P3_RECIPE"
-            echo "def _p4a_android_prebuild(self, arch):" >> "$P3_RECIPE"
-            echo "    if _p4a_orig_prebuild is not None:" >> "$P3_RECIPE"
-            echo "        _p4a_orig_prebuild(self, arch)" >> "$P3_RECIPE"
-            echo "    try:" >> "$P3_RECIPE"
-            echo "        bd = self.get_build_dir(arch.arch)" >> "$P3_RECIPE"
-            echo "        cfg = _p4a_os.path.join(bd, 'configure')" >> "$P3_RECIPE"
-            echo "        if _p4a_os.path.exists(cfg):" >> "$P3_RECIPE"
-            echo "            _p4a_sp.call(['sed', '-i', 's/-Werror=implicit-function-declaration//g', cfg])" >> "$P3_RECIPE"
-            echo "            print('[p4a-fix] patched configure: ' + cfg)" >> "$P3_RECIPE"
-            echo "    except Exception as e:" >> "$P3_RECIPE"
-            echo "        print('[p4a-fix] failed: ' + str(e))" >> "$P3_RECIPE"
-            echo "Python3Recipe.prebuild_arch = _p4a_android_prebuild" >> "$P3_RECIPE"
+            cat /tmp/p4a_hook.txt >> "$P3_RECIPE"
           fi
+
+          # ---- 3. PythonActivity.java（用 awk 文件）----
+          find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r JF; do
+            if ! grep -q "_p4a_activity_patched" "$JF"; then
+              awk -f /tmp/patch_activity.awk "$JF" > "$JF.new" && mv "$JF.new" "$JF"
+              echo "已补丁: $JF"
+            fi
+          done
+
+          # ---- 4. 验证 python3 recipe 语法 ----
+          echo "===== 验证 recipe 语法 ====="
+          python3 -c "import ast; ast.parse(open('$P3_RECIPE').read()); print('recipe 语法 OK')" || echo "recipe 语法错误！"
 
       - name: Patch default.spec
         run: |
@@ -243,54 +292,14 @@ jobs:
           fi
 
       # ============================================================
-      # 后台 patcher
+      # 启动后台 patcher
       # ============================================================
       - name: Start background patcher
         run: |
-          : > /tmp/patcher.sh
-          echo '#!/bin/bash' >> /tmp/patcher.sh
-          echo 'LOG=/tmp/patcher.log' >> /tmp/patcher.sh
-          echo 'echo "start $(date)" > $LOG' >> /tmp/patcher.sh
-          echo 'TARGET_PY="$TARGET_PYTHON"' >> /tmp/patcher.sh
-          echo 'TARBALL="/tmp/Python-${TARGET_PY}.tar.xz"' >> /tmp/patcher.sh
-          echo 'if [ -f "$TARBALL" ]; then MD5=$(md5sum "$TARBALL" | awk "{print \$1}"); SHA256=$(sha256sum "$TARBALL" | awk "{print \$1}"); else MD5=""; SHA256=""; fi' >> /tmp/patcher.sh
-          echo 'while true; do' >> /tmp/patcher.sh
-          echo '  for P4A in "$GITHUB_WORKSPACE/.buildozer/android/platform/python-for-android" "$HOME/.buildozer/android/platform/python-for-android"; do' >> /tmp/patcher.sh
-          echo '    [ -d "$P4A" ] || continue' >> /tmp/patcher.sh
-          echo '    for R in python3 hostpython3; do' >> /tmp/patcher.sh
-          echo '      F="$P4A/pythonforandroid/recipes/$R/__init__.py"' >> /tmp/patcher.sh
-          echo '      if [ -f "$F" ] && grep -qE "version = .3\.14\." "$F"; then' >> /tmp/patcher.sh
-          echo '        sed -i -E "s/version = .3\.[0-9]+\.[0-9]+./version = \"$TARGET_PY\"/" "$F"' >> /tmp/patcher.sh
-          echo '      fi' >> /tmp/patcher.sh
-          echo '    done' >> /tmp/patcher.sh
-          echo '    P3="$P4A/pythonforandroid/recipes/python3/__init__.py"' >> /tmp/patcher.sh
-          echo '    if [ -f "$P3" ] && ! grep -q "_p4a_android_prebuild" "$P3"; then' >> /tmp/patcher.sh
-          echo '      echo "" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "import os as _p4a_os" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "import subprocess as _p4a_sp" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "_p4a_orig_prebuild = getattr(Python3Recipe, '"'"'prebuild_arch'"'"', None)" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "def _p4a_android_prebuild(self, arch):" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "    if _p4a_orig_prebuild is not None:" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "        _p4a_orig_prebuild(self, arch)" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "    try:" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "        bd = self.get_build_dir(arch.arch)" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "        cfg = _p4a_os.path.join(bd, '"'"'configure'"'"')" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "        if _p4a_os.path.exists(cfg):" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "            _p4a_sp.call(['"'"'sed'"'"', '"'"'-i'"'"', '"'"'s/-Werror=implicit-function-declaration//g'"'"', cfg])" >> "$P3"' >> /tmp/patcher.sh
-          echo '      echo "Python3Recipe.prebuild_arch = _p4a_android_prebuild" >> "$P3"' >> /tmp/patcher.sh
-          echo '    fi' >> /tmp/patcher.sh
-          echo '    find "$P4A/pythonforandroid/bootstraps" -name "PythonActivity.java" -type f 2>/dev/null | while IFS= read -r F; do' >> /tmp/patcher.sh
-          echo '      if ! grep -q "_p4a_activity_patched" "$F"; then' >> /tmp/patcher.sh
-          echo '        awk "/^public class PythonActivity/ { print; print \"    /* _p4a_activity_patched */\"; print \"    static {\"; print \"        try {\"; print \"            System.loadLibrary(\\\"Qt6Core_\\\" + android.os.Build.SUPPORTED_ABIS[0]);\"; print \"        } catch (Throwable ignored) {}\"; print \"    }\"; next; } /onCreate\\(Bundle/ { print; print \"        /* _p4a_activity_patched */\"; print \"        try {\"; print \"            Class<?> _qtNative = Class.forName(\\\"org.qtproject.qt.android.QtNative\\\");\"; print \"            java.lang.reflect.Method _setAct = _qtNative.getDeclaredMethod(\\\"setActivity\\\", android.app.Activity.class);\"; print \"            _setAct.setAccessible(true);\"; print \"            _setAct.invoke(null, this);\"; print \"        } catch (Throwable ignored) {}\"; next; } { print }" "$F" > "$F.new" && mv "$F.new" "$F"' >> /tmp/patcher.sh
-          echo '      fi' >> /tmp/patcher.sh
-          echo '    done' >> /tmp/patcher.sh
-          echo '  done' >> /tmp/patcher.sh
-          echo '  sleep 1' >> /tmp/patcher.sh
-          echo 'done' >> /tmp/patcher.sh
-          chmod +x /tmp/patcher.sh
           nohup /tmp/patcher.sh > /dev/null 2>&1 &
           echo "$!" > /tmp/patcher.pid
           sleep 2
+          echo "=== Patcher 启动日志 ==="
           cat /tmp/patcher.log || true
 
       - name: Run pyside6-android-deploy
@@ -330,23 +339,22 @@ jobs:
           grep -n "p4a-fix" "$GITHUB_WORKSPACE/build.log" | tail -5 || echo "无"
 
           echo ""
-          echo "=== 2. Java 编译错误 ==="
-          grep -nE 'error: |cannot find symbol' "$GITHUB_WORKSPACE/build.log" | grep -v "grpmodule" | grep -v "implicit-function-declaration" | tail -20 || echo "无"
+          echo "=== 2. Python 语法错误 ==="
+          grep -nE 'SyntaxError|IndentationError' "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "无"
 
           echo ""
-          echo "=== 3. p4a [ERROR] ==="
-          grep -n '\[ERROR\]' "$GITHUB_WORKSPACE/build.log" | tail -10 || echo "无"
+          echo "=== 3. Java 编译错误 ==="
+          grep -nE 'error: |cannot find symbol' "$GITHUB_WORKSPACE/build.log" | grep -v "grpmodule" | grep -v "implicit-function-declaration" | tail -10 || echo "无"
 
           echo ""
-          echo "=== 4. Buildozer failed 之前 200 行 ==="
+          echo "=== 4. Buildozer failed 之前 100 行 ==="
           FAIL_LINE=$(grep -n "Buildozer failed to execute" "$GITHUB_WORKSPACE/build.log" | head -1 | cut -d: -f1)
           if [ -n "$FAIL_LINE" ]; then
-            START=$((FAIL_LINE - 200))
+            START=$((FAIL_LINE - 100))
             [ "$START" -lt 1 ] && START=1
             sed -n "${START},${FAIL_LINE}p" "$GITHUB_WORKSPACE/build.log"
           else
-            echo "未找到 Buildozer failed 标记，打印末尾 200 行："
-            tail -200 "$GITHUB_WORKSPACE/build.log"
+            echo "未找到 Buildozer failed 标记"
           fi
 
       - name: Collect APK
