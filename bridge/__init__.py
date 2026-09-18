@@ -1,5 +1,5 @@
 # bridge/__init__.py
-# bridge 包入口：只导出 ControllerBridge，保证 `from bridge import ControllerBridge` 可用。
+# 桥接层包入口：对外只暴露 ControllerBridge。
 
 from .controller_bridge import ControllerBridge
 
