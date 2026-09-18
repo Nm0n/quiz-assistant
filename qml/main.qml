@@ -224,10 +224,12 @@ ApplicationWindow {
 
     function openFilePicker() {
         console.log("[MainMenu] openFilePicker platform=" + Qt.platform.os)
-        // Android 与桌面统一：调用系统文件选择器导入 JSON
-        // Android 上 Qt 的 FileDialog 底层会弹出系统 SAF 选择器
-        openFileDialogTimer.targetDialog = openJsonDialog
-        openFileDialogTimer.start()
+        if (appWindow.isAndroidPlatform) {
+            bridge.openFilePickerAndroid()
+        } else {
+            openFileDialogTimer.targetDialog = openJsonDialog
+            openFileDialogTimer.start()
+        }
     }
 
     // ============================================================
