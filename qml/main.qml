@@ -122,23 +122,7 @@ ApplicationWindow {
         verticalAlignment: Text.AlignBottom
     }
 
-    // ============================================================
-    // 应用内文件浏览器（Android）—— 已抽到 FilePickerDialog.qml
-    // ============================================================
-    FilePickerDialog {
-        id: filePickerDialog
-        parentWindowWidth: appWindow.width
-        parentWindowHeight: appWindow.height
-        buildTag: appWindow.buildTag
-    }
-
-    // ============================================================
-    // 存储权限引导对话框 —— 已抽到 PermissionDialog.qml
-    // ============================================================
-    PermissionDialog {
-        id: permissionDialog
-        parentWindowWidth: appWindow.width
-    }
+    
 
     // ============================================================
     // 桌面端文件对话框
@@ -187,16 +171,7 @@ ApplicationWindow {
     // ============================================================
     // 延迟打开对话框的 Timer
     // ============================================================
-    Timer {
-        id: filePickerTimer
-        interval: 300
-        repeat: false
-        onTriggered: {
-            console.log("[MainMenu] opening custom filePickerDialog")
-            filePickerDialog.open()
-        }
-    }
-
+    
     Timer {
         id: openFileDialogTimer
         property var targetDialog: null
@@ -249,19 +224,10 @@ ApplicationWindow {
 
     function openFilePicker() {
         console.log("[MainMenu] openFilePicker platform=" + Qt.platform.os)
-        if (appWindow.isAndroidPlatform) {
-            // ★★ Android：使用应用内文件浏览器 ★★
-            if (!bridge.hasStoragePermission()) {
-                permissionDialog.open()
-                return
-            }
-            bridge.ensureWatchDir()
-            filePickerTimer.start()
-        } else {
-            // 桌面：使用系统 FileDialog
-            openFileDialogTimer.targetDialog = openJsonDialog
-            openFileDialogTimer.start()
-        }
+        // Android 与桌面统一：调用系统文件选择器导入 JSON
+        // Android 上 Qt 的 FileDialog 底层会弹出系统 SAF 选择器
+        openFileDialogTimer.targetDialog = openJsonDialog
+        openFileDialogTimer.start()
     }
 
     // ============================================================
@@ -275,7 +241,7 @@ ApplicationWindow {
             openFileDialogTimer.targetDialog = openJsonDialog
             openFileDialogTimer.start()
         }
-        function onStoragePermissionRequired() { permissionDialog.open() }
+        
     }
 
     // ============================================================
