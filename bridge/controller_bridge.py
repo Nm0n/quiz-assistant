@@ -18,15 +18,17 @@ from .view_state import ViewStateMixin
 class ControllerBridge(FileOpsMixin, QuizOpsMixin, AndroidStorageMixin, ViewStateMixin, QObject):
     """把 SessionController 适配为 QML 可用的 Qt 对象。"""
 
-    # 跨 Mixin 共享信号：FileOpsMixin / QuizOpsMixin / AndroidStorageMixin 都会用到
     infoMessage = Signal(str)
     errorOccurred = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._controller = SessionController()
-        # 依次调用各 Mixin 的初始化钩子
         self._init_file_ops()
         self._init_quiz_ops()
         self._init_android_storage()
         self._init_view_state()
+        # 在 Android 上注册文件选择器回调
+        from platform_utils import is_android
+        if is_android():
+            self._init_android_file_picker()
