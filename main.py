@@ -1,16 +1,12 @@
 # main.py
 # 移动端 / 跨平台入口：加载 QML，注册桥接对象，启动应用。
 #
-# 拆分后本文件只保留：
-#   - _qml_candidates()：QML 路径探测
-#   - main()：应用启动
-#
-# ControllerBridge 已移至 bridge 包，从 bridge 导入即可。
-#
-# 文件加载策略（与原版一致）：
+# 文件加载策略：
 #   - Android：应用内文件浏览器，扫描 /storage/emulated/0/Download/quizassistant/
 #              需要 MANAGE_EXTERNAL_STORAGE 权限（首次使用引导用户开启）
 #   - 桌面：走 QML FileDialog
+#
+# 拆分说明：所有桥接逻辑已移至 bridge/ 包，本文件只保留 QML 路径探测与 main()。
 
 import os
 import sys
@@ -51,9 +47,6 @@ def _qml_candidates():
 
 
 def main():
-    # 启动日志：验证平台判断，logcat 里应看到 is_android() = True
-    print("[Platform] is_android() = {}".format(is_android()))
-
     app = QGuiApplication(sys.argv)
     app.setApplicationName("智能刷题助手")
     app.setOrganizationName("QuizAssistant")
