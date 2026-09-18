@@ -242,3 +242,56 @@ class FileOpsMixin:
         if not self._controller.has_questions() or not path:
             return False
         return self.saveToFile(path)
+
+    def _process_imported_bytes(self, data, name):
+        """
+        接收 Android 文件选择器返回的字节数据，写入私有目录后加载。
+        由 AndroidStorageMixin._on_activity_result 动态派发调用。
+        """
+        import datetime
+
+        if not data:
+            self.errorOccurred.emit("文件内容为空")
+            return
+
+        # 生成安全的目标文件名
+        if not name or not name.lower().endswith(".json"):
+            name = "题库_{}.json".format(
+                datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            )
+
+        watch_dir = self._get_watch_dir()
+        target_path = os.path.join(watch_dir, name)
+        counter = 1
+        while os.path.exists(target_path):
+            stem, ext = os.path.splitext(name)
+            target_path = os.path.join(
+                watch_dir, "{}_{}{}".format(stem, counter, ext)
+            )
+            counter += 1
+
+        try:
+            with open(target_path, "wb") as f:
+                f.write(data)
+            print("[_process_imported_bytes] saved to {}".format(target_path))
+        except Exception as e:
+            self.errorOccurred.emit("保存导入文件失败：{}".format(e))
+            return
+
+        # 直接从私有目录加载
+        try:
+            with open(target_path, "r", encoding="utf-8") as f:
+                count = self._controller.load_from_json_file(f)
+        except Exception as e:
+            self.errorOccurred.emit("加载失败：{}".format(e))
+            return
+
+        if count > 0:
+            self._controller.current_file_path = target_path
+            self._controller.is_modified = False
+
+        self._refresh()
+        if count == 0:
+            self.errorOccurred.emit("该文件不包含有效题目数据")
+        else:
+            self.infoMessage.emit("已打开题库，共 {} 道题".format(count))
