@@ -33,15 +33,12 @@ def _qml_candidates():
     candidates.append(os.path.join(base, "..", "qml", "main.qml"))
     candidates.append(os.path.join(os.getcwd(), "qml", "main.qml"))
 
-    if is_android():
-        try:
-            from android import mActivity  # type: ignore
-            ctx = mActivity.getApplicationContext()
-            files_dir = ctx.getFilesDir().getAbsolutePath()
-            candidates.append(os.path.join(files_dir, "qml", "main.qml"))
-            candidates.append(os.path.join(files_dir, "app", "qml", "main.qml"))
-        except Exception as e:
-            print("[QML] android 私有目录探测失败：{}".format(e))
+    # 已移除 Android 私有目录探测。
+    # 原因：在 QML 引擎初始化期间导入 `android` 模块（p4a 的 Android 支持）
+    # 会触发 JNI 初始化，干扰 Qt 的 JVM 状态，导致随后加载 libQt6Quick 时
+    # JNI_OnLoad 中 QJniEnvironment::getJniEnv() 返回空指针并崩溃（SIGSEGV）。
+    # QML 文件已通过 pysidedeploy.spec 的 qml_files 打包进 APK 资源，
+    # qrc:/ 或 assets:/ 分支已足够。
 
     return candidates
 
