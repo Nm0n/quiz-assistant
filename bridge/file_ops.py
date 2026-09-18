@@ -127,7 +127,9 @@ class FileOpsMixin:
             return 0
 
         if count > 0:
-            self._controller.current_file_path = resolved
+            # 把导入的文件复制到应用私有目录（如果还不在那里）
+            final_path = self._import_to_private_dir(resolved)
+            self._controller.current_file_path = final_path
             self._controller.is_modified = False
 
         self._refresh()
@@ -137,6 +139,49 @@ class FileOpsMixin:
             self.infoMessage.emit("已打开题库，共 {} 道题".format(count))
         return count
 
+    def _import_to_private_dir(self, source_path):
+        """
+        把用户选中的文件复制到应用私有题库目录，返回最终的目标路径。
+        如果来源已经在私有目录内，或者复制失败，返回原路径。
+        """
+        import datetime
+
+        if not source_path:
+            return None
+
+        watch_dir = self._get_watch_dir()
+
+        # 已经在私有目录里，不需要复制
+        if source_path.startswith(watch_dir):
+            return source_path
+
+        # 生成目标文件名
+        base_name = self._basename(source_path)
+        if (not base_name or base_name == "未命名"
+                or not base_name.lower().endswith(".json")):
+            base_name = "题库_{}.json".format(
+                datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            )
+
+        # 避免重名
+        target_path = os.path.join(watch_dir, base_name)
+        counter = 1
+        while os.path.exists(target_path):
+            name, ext = os.path.splitext(base_name)
+            target_path = os.path.join(
+                watch_dir, "{}_{}{}".format(name, counter, ext)
+            )
+            counter += 1
+
+        try:
+            # 用 controller 的 save_to_file 把当前 engine 的内容写到 target
+            self._controller.save_to_file(target_path)
+        except Exception as e:
+            print("[_import_to_private_dir] failed: {}".format(e))
+            return source_path
+
+        return target_path
+        
     @Slot(str, result=int)
     def loadFromExcel(self, raw):
         if is_android():
