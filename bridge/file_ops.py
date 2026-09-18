@@ -41,16 +41,15 @@ class FileOpsMixin:
             return (raw, raw) if os.path.exists(raw) else (None, None)
 
         if raw.startswith("content://"):
-            if not is_android():
+            # Qt 6.5+ 的 QFile 支持直接打开 content:// URI，无需 jnius
+            qf = QFile(QUrl(raw))
+            if not qf.open(QIODevice.ReadOnly):
+                print("[content://] QFile open failed for: {}".format(raw))
                 return None, None
             try:
-                data = self._read_android_uri(raw)
-                if data is None:
-                    return None, None
-                return io.BytesIO(data), raw
-            except Exception as e:
-                print("[content://] read failed: {}".format(e))
-                return None, None
+                return io.BytesIO(bytes(qf.readAll())), raw
+            finally:
+                qf.close()
 
         qf = QFile(QUrl(raw))
         if not qf.open(QIODevice.ReadOnly):
