@@ -142,7 +142,7 @@ fi
 # ndk
 # ================================================================
 if [ "$CMD" = "ndk" ]; then
-    yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
+    yes | sdkmanager --install "ndk;${ANDROID_NDK_VERSION}" || true
     test -d "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" || (echo "NDK 安装失败" && exit 1)
     echo "NDK r27c 已安装"
     ls "$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}/" | head -20
