@@ -2,6 +2,9 @@
 // 主窗口。文件选择策略：
 //   - Android：应用内文件浏览器（Qt.platform.os === "android" 判断）
 //   - 桌面：QML FileDialog
+//
+// 阶段三拆分：原内联的 filePickerDialog / permissionDialog / toast
+// 已抽到独立文件，这里只负责实例化并传入必要 property。
 
 import QtQuick
 import QtQuick.Controls
@@ -120,224 +123,21 @@ ApplicationWindow {
     }
 
     // ============================================================
-    // 应用内文件浏览器（Android）
+    // 应用内文件浏览器（Android）—— 已抽到 FilePickerDialog.qml
     // ============================================================
-    Dialog {
+    FilePickerDialog {
         id: filePickerDialog
-        title: "选择题库文件"
-        modal: true
-        anchors.centerIn: parent
-        width: Math.min(appWindow.width - 32, 420)
-        height: Math.min(appWindow.height - 80, 600)
-        padding: 0
-
-        property var files: []
-        property string watchDir: ""
-
-        function refresh() {
-            watchDir = bridge.getWatchDir()
-            files = bridge.listJsonFiles()
-        }
-
-        onAboutToShow: refresh()
-
-        contentItem: Rectangle {
-            implicitWidth: 380
-            implicitHeight: 520
-            color: "#ffffff"
-
-            ColumnLayout {
-                anchors.fill: parent
-                spacing: 0
-
-                // ---- 顶部：目录提示 ----
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 110
-                    color: "#f5f7fa"
-
-                    ColumnLayout {
-                        anchors.fill: parent
-                        anchors.margins: 12
-                        spacing: 6
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 6
-
-                            Text {
-                                Layout.fillWidth: true
-                                text: "📁 文件目录 " + appWindow.buildTag
-                                font.pixelSize: 13
-                                font.bold: true
-                                color: "#303133"
-                            }
-
-                            Button {
-                                text: "刷新"
-                                implicitHeight: 28
-                                implicitWidth: 60
-                                font.pixelSize: 12
-                                onClicked: filePickerDialog.refresh()
-                            }
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: filePickerDialog.watchDir
-                            wrapMode: Text.WrapAnywhere
-                            font.pixelSize: 11
-                            color: "#606266"
-                            maximumLineCount: 2
-                            elide: Text.ElideRight
-                        }
-
-                        Button {
-                            text: "📋 复制路径"
-                            implicitHeight: 26
-                            implicitWidth: 100
-                            font.pixelSize: 11
-                            onClicked: bridge.copyToClipboard(filePickerDialog.watchDir)
-                        }
-                    }
-                }
-
-                // ---- 中间：文件列表 或 空提示 ----
-                Item {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-
-                    Column {
-                        anchors.centerIn: parent
-                        width: parent.width - 48
-                        spacing: 10
-                        visible: filePickerDialog.files.length === 0
-
-                        Text {
-                            width: parent.width
-                            text: "📂"
-                            font.pixelSize: 52
-                            horizontalAlignment: Text.AlignHCenter
-                        }
-                        Text {
-                            width: parent.width
-                            text: "目录中没有 JSON 文件"
-                            font.pixelSize: 15
-                            font.bold: true
-                            color: "#303133"
-                            horizontalAlignment: Text.AlignHCenter
-                        }
-                        Text {
-                            width: parent.width
-                            text: "请把 .json 文件复制到上面的目录，然后点击「刷新」。\n\n可以用系统的「文件管理」应用，或用 USB 连接电脑操作。"
-                            wrapMode: Text.WordWrap
-                            font.pixelSize: 12
-                            color: "#909399"
-                            horizontalAlignment: Text.AlignHCenter
-                            lineHeight: 1.4
-                        }
-                    }
-
-                    ListView {
-                        anchors.fill: parent
-                        anchors.margins: 8
-                        clip: true
-                        spacing: 2
-                        visible: filePickerDialog.files.length > 0
-                        model: filePickerDialog.files
-
-                        delegate: Rectangle {
-                            width: ListView.view.width
-                            height: 60
-                            radius: 6
-                            color: fileArea.pressed ? "#ecf5ff" : "transparent"
-                            border.width: 1
-                            border.color: fileArea.pressed ? "#409eff" : "#f0f2f5"
-
-                            Column {
-                                anchors.verticalCenter: parent.verticalCenter
-                                anchors.left: parent.left
-                                anchors.leftMargin: 14
-                                anchors.right: parent.right
-                                anchors.rightMargin: 14
-                                spacing: 3
-
-                                Text {
-                                    width: parent.width
-                                    text: modelData.name
-                                    font.pixelSize: 14
-                                    color: "#303133"
-                                    elide: Text.ElideRight
-                                }
-                                Text {
-                                    text: (modelData.size / 1024).toFixed(1) + " KB"
-                                    font.pixelSize: 11
-                                    color: "#909399"
-                                }
-                            }
-
-                            MouseArea {
-                                id: fileArea
-                                anchors.fill: parent
-                                onClicked: {
-                                    filePickerDialog.close()
-                                    bridge.loadJsonFile(modelData.path)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // ---- 底部：关闭 ----
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 56
-                    color: "#ffffff"
-
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.margins: 10
-                        spacing: 8
-
-                        Item { Layout.fillWidth: true }
-
-                        Button {
-                            text: "关闭"
-                            implicitHeight: 36
-                            implicitWidth: 88
-                            font.pixelSize: 13
-                            onClicked: filePickerDialog.close()
-                        }
-                    }
-                }
-            }
-        }
+        parentWindowWidth: appWindow.width
+        parentWindowHeight: appWindow.height
+        buildTag: appWindow.buildTag
     }
 
     // ============================================================
-    // 存储权限引导对话框
+    // 存储权限引导对话框 —— 已抽到 PermissionDialog.qml
     // ============================================================
-    Dialog {
+    PermissionDialog {
         id: permissionDialog
-        title: "需要文件访问权限"
-        modal: true
-        anchors.centerIn: parent
-        width: Math.min(appWindow.width - 40, 360)
-        standardButtons: Dialog.Ok | Dialog.Cancel
-        onAccepted: bridge.openStoragePermissionSettings()
-        onRejected: close()
-
-        contentItem: Text {
-            text: "本应用需要「所有文件访问」权限，才能读取你放在「下载/quizassistant」目录里的题库文件。\n\n" +
-                  "点击「确定」将打开系统设置页面。荣耀手机上的路径通常是：\n" +
-                  "设置 → 应用 → 应用管理 → 智能刷题助手 → 权限 → 所有文件访问\n\n" +
-                  "若找不到入口，可以尝试：\n" +
-                  "设置 → 应用 → 权限管理 → 右上角三点 → 特殊访问权限 → 所有文件访问权限\n\n" +
-                  "开启后回到应用，再次点击「打开题库」即可。"
-            wrapMode: Text.WordWrap
-            font.pixelSize: 13
-            color: "#303133"
-        }
+        parentWindowWidth: appWindow.width
     }
 
     // ============================================================
@@ -834,47 +634,10 @@ ApplicationWindow {
     }
 
     // ============================================================
-    // Toast
+    // Toast —— 已抽到 Toast.qml
     // ============================================================
-    Rectangle {
+    Toast {
         id: toast
-        property string message: ""
-
-        z: 999
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: 70
-
-        width: Math.min(appWindow.width - 60, toastText.implicitWidth + 36)
-        height: toastText.implicitHeight + 22
-        radius: 8
-        color: "#303133"
-        opacity: 0
-        visible: opacity > 0
-
-        Text {
-            id: toastText
-            anchors.centerIn: parent
-            text: toast.message
-            color: "#ffffff"
-            font.pixelSize: 13
-            wrapMode: Text.WordWrap
-            width: toast.width - 24
-            horizontalAlignment: Text.AlignHCenter
-        }
-
-        Behavior on opacity { NumberAnimation { duration: 180 } }
-
-        Timer {
-            id: toastTimer
-            interval: 2200
-            onTriggered: toast.opacity = 0
-        }
-
-        function show(msg) {
-            message = msg
-            opacity = 1
-            toastTimer.restart()
-        }
+        parentWindowWidth: appWindow.width
     }
 }
