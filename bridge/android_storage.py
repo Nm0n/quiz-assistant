@@ -92,16 +92,15 @@ class AndroidStorageMixin:
     @staticmethod
     def _get_watch_dir():
         """
-        Android: /storage/emulated/0/Download/quizassistant/
-        桌面:   <项目根>/data/
+        返回应用专属题库目录，无需任何运行时权限。
+        Android: /data/data/<包名>/files/app/data/quizassistant/
+        桌面:   <项目根>/data/quizassistant/
         """
-        if is_android():
-            return ANDROID_WATCH_DIR
-        else:
-            base = os.path.dirname(os.path.abspath(__file__))
-            path = os.path.join(base, "data")
-            os.makedirs(path, exist_ok=True)
-            return path
+        base = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(base)
+        path = os.path.join(project_root, "data", "quizassistant")
+        os.makedirs(path, exist_ok=True)
+        return path
 
     @Slot(result=str)
     def getWatchDir(self):
