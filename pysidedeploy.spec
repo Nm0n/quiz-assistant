@@ -10,9 +10,8 @@ python_version = 3.11
 android_packages = 
 
 [qt]
-qml_files = qml/main.qml, qml/OptionItem.qml, qml/QuestionPanel.qml
+qml_files = qml/main.qml, qml/OptionItem.qml, qml/QuestionPanel.qml, qml/FilePickerDialog.qml, qml/PermissionDialog.qml, qml/Toast.qml
 excluded_qml_plugins = 
-
 
 [android]
 plugins = 
