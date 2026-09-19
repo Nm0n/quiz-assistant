@@ -268,9 +268,22 @@ ApplicationWindow {
             spacing: 4
 
             ToolButton {
-                text: "☰"
-                font.pixelSize: 20
+                implicitWidth: 48
+                implicitHeight: 48
                 onClicked: menuDrawer.open()
+
+                contentItem: Item {
+                    anchors.fill: parent
+
+                    Column {
+                        anchors.centerIn: parent
+                        spacing: 4
+
+                        Rectangle { width: 22; height: 2; radius: 1; color: "#303133" }
+                        Rectangle { width: 22; height: 2; radius: 1; color: "#303133" }
+                        Rectangle { width: 22; height: 2; radius: 1; color: "#303133" }
+                    }
+                }
             }
 
             Label {
