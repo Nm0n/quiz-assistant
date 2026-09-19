@@ -123,6 +123,16 @@ ApplicationWindow {
     }
 
     // ============================================================
+    // Android 题库选择器
+    // ============================================================
+    FilePickerDialog {
+        id: filePickerDialog
+        parentWindowWidth: appWindow.width
+        parentWindowHeight: appWindow.height
+        buildTag: appWindow.buildTag
+    }
+
+    // ============================================================
     // 桌面端文件对话框
     // ============================================================
     FileDialog {
@@ -222,8 +232,8 @@ ApplicationWindow {
     function openFilePicker() {
         console.log("[MainMenu] openFilePicker platform=" + Qt.platform.os)
         if (appWindow.isAndroidPlatform) {
-            // Android：走原生 Intent（依赖 pyjnius，当前可能不可用）
-            bridge.openFilePickerAndroid()
+            // Android：打开题库选择器（列出已导入的题库 + 导入新题库按钮）
+            filePickerDialog.open()
         } else {
             // 桌面：使用系统 FileDialog
             openFileDialogTimer.targetDialog = openJsonDialog
