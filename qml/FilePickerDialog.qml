@@ -1,7 +1,8 @@
 // qml/FilePickerDialog.qml
-// 应用内文件浏览器（Android 使用）。
+// 题库选择器（Android 使用）。
+// 显示应用私有目录中已导入的题库列表，并支持从剪贴板导入新题库。
 // 由 main.qml 实例化，对外暴露 parentWindowWidth / parentWindowHeight / buildTag
-// 三个 property，用于替代原本对 appWindow 的跨文件引用。
+// 三个 property。
 
 import QtQuick
 import QtQuick.Controls
@@ -10,12 +11,12 @@ import QtQuick.Layouts
 Dialog {
     id: root
 
-    // ---------- 外部传入（替代 appWindow.xxx） ----------
+    // ---------- 外部传入 ----------
     property real parentWindowWidth: 0
     property real parentWindowHeight: 0
     property string buildTag: ""
 
-    title: "选择题库文件"
+    title: "选择题库"
     modal: true
     anchors.centerIn: parent
     width: Math.min(parentWindowWidth - 32, 420)
@@ -23,10 +24,8 @@ Dialog {
     padding: 0
 
     property var files: []
-    property string watchDir: ""
 
     function refresh() {
-        watchDir = bridge.getWatchDir()
         files = bridge.listJsonFiles()
     }
 
@@ -41,59 +40,47 @@ Dialog {
             anchors.fill: parent
             spacing: 0
 
-            // ---- 顶部：目录提示 ----
+            // ---- 顶部：标题 + 按钮 ----
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 110
+                Layout.preferredHeight: 60
                 color: "#f5f7fa"
 
-                ColumnLayout {
+                RowLayout {
                     anchors.fill: parent
                     anchors.margins: 12
                     spacing: 6
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 6
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: "📁 文件目录 " + root.buildTag
-                            font.pixelSize: 13
-                            font.bold: true
-                            color: "#303133"
-                        }
-
-                        Button {
-                            text: "刷新"
-                            implicitHeight: 28
-                            implicitWidth: 60
-                            font.pixelSize: 12
-                            onClicked: root.refresh()
-                        }
-                    }
-
                     Text {
                         Layout.fillWidth: true
-                        text: root.watchDir
-                        wrapMode: Text.WrapAnywhere
-                        font.pixelSize: 11
-                        color: "#606266"
-                        maximumLineCount: 2
-                        elide: Text.ElideRight
+                        text: "已导入的题库"
+                        font.pixelSize: 14
+                        font.bold: true
+                        color: "#303133"
+                        verticalAlignment: Text.AlignVCenter
                     }
 
                     Button {
-                        text: "📋 复制路径"
-                        implicitHeight: 26
-                        implicitWidth: 100
-                        font.pixelSize: 11
-                        onClicked: bridge.copyToClipboard(root.watchDir)
+                        text: "📋 导入新题库"
+                        implicitHeight: 30
+                        font.pixelSize: 12
+                        onClicked: {
+                            bridge.importFromClipboard()
+                            root.refresh()
+                        }
+                    }
+
+                    Button {
+                        text: "刷新"
+                        implicitHeight: 30
+                        implicitWidth: 60
+                        font.pixelSize: 12
+                        onClicked: root.refresh()
                     }
                 }
             }
 
-            // ---- 中间：文件列表 或 空提示 ----
+            // ---- 中间：列表 或 空提示 ----
             Item {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -112,7 +99,7 @@ Dialog {
                     }
                     Text {
                         width: parent.width
-                        text: "目录中没有 JSON 文件"
+                        text: "还没有导入任何题库"
                         font.pixelSize: 15
                         font.bold: true
                         color: "#303133"
@@ -120,7 +107,7 @@ Dialog {
                     }
                     Text {
                         width: parent.width
-                        text: "请把 .json 文件复制到上面的目录，然后点击「刷新」。\n\n可以用系统的「文件管理」应用，或用 USB 连接电脑操作。"
+                        text: "点击右上角「📋 导入新题库」，从剪贴板粘贴 JSON 题库内容。"
                         wrapMode: Text.WordWrap
                         font.pixelSize: 12
                         color: "#909399"
