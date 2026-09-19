@@ -137,6 +137,85 @@ class AndroidStorageMixin:
         print("[listJsonFiles] dir={} count={}".format(watch_dir, len(result)))
         return result
 
+    # ==============================================================
+    # 题库文件管理：删除 / 重命名
+    # ==============================================================
+    @Slot(str, result=bool)
+    def deleteJsonFile(self, path):
+        """删除指定的题库文件。仅允许操作应用私有目录内的文件。"""
+        try:
+            watch_dir = self._get_watch_dir()
+            # 安全检查：只允许删除私有目录内的文件
+            if not path or not os.path.abspath(path).startswith(os.path.abspath(watch_dir)):
+                self.errorOccurred.emit("只能删除应用内的题库文件")
+                return False
+            if not os.path.exists(path):
+                self.errorOccurred.emit("文件不存在")
+                return False
+
+            os.remove(path)
+
+            # 如果删除的是当前加载的文件，清空 current_file_path
+            if getattr(self._controller, "current_file_path", None) == path:
+                self._controller.current_file_path = None
+                self._controller.is_modified = True
+                if hasattr(self, "_refresh"):
+                    self._refresh()
+
+            self.infoMessage.emit("已删除")
+            return True
+        except Exception as e:
+            self.errorOccurred.emit("删除失败：{}".format(e))
+            return False
+
+    @Slot(str, str, result=bool)
+    def renameJsonFile(self, old_path, new_name):
+        """重命名题库文件。仅允许操作应用私有目录内的文件。"""
+        try:
+            watch_dir = self._get_watch_dir()
+            if not old_path or not os.path.abspath(old_path).startswith(os.path.abspath(watch_dir)):
+                self.errorOccurred.emit("只能重命名应用内的题库文件")
+                return False
+            if not os.path.exists(old_path):
+                self.errorOccurred.emit("文件不存在")
+                return False
+
+            new_name = (new_name or "").strip()
+            if not new_name:
+                self.errorOccurred.emit("文件名不能为空")
+                return False
+
+            # 去除路径分隔符，避免越出目录
+            new_name = new_name.replace("/", "_").replace("\\", "_")
+
+            # 自动补 .json 后缀
+            if not new_name.lower().endswith(".json"):
+                new_name += ".json"
+
+            new_path = os.path.join(watch_dir, new_name)
+
+            # 名字没变，直接返回
+            if os.path.abspath(new_path) == os.path.abspath(old_path):
+                return True
+
+            if os.path.exists(new_path):
+                self.errorOccurred.emit("同名文件已存在")
+                return False
+
+            os.rename(old_path, new_path)
+
+            # 如果重命名的是当前加载的文件，同步更新路径
+            if getattr(self._controller, "current_file_path", None) == old_path:
+                self._controller.current_file_path = new_path
+                if hasattr(self, "_refresh"):
+                    self._refresh()
+
+            self.infoMessage.emit("已重命名")
+            return True
+        except Exception as e:
+            self.errorOccurred.emit("重命名失败：{}".format(e))
+            return False
+    
     @Slot(str)
     def copyToClipboard(self, text):
         try:
