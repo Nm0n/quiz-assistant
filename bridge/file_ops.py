@@ -181,7 +181,7 @@ class FileOpsMixin:
             return source_path
 
         return target_path
-        
+
     @Slot(str, result=int)
     def loadFromExcel(self, raw):
         if is_android():
@@ -243,6 +243,9 @@ class FileOpsMixin:
             return False
         return self.saveToFile(path)
 
+    # ==============================================================
+    # Android 文件选择器回调处理（保留，供未来使用）
+    # ==============================================================
     def _process_imported_bytes(self, data, name):
         """
         接收 Android 文件选择器返回的字节数据，写入私有目录后加载。
@@ -295,3 +298,238 @@ class FileOpsMixin:
             self.errorOccurred.emit("该文件不包含有效题目数据")
         else:
             self.infoMessage.emit("已打开题库，共 {} 道题".format(count))
+
+    # ==============================================================
+    # 从剪贴板导入题库（新建 / 替换）
+    # ==============================================================
+    @Slot(result=int)
+    def importFromClipboard(self):
+        """
+        从系统剪贴板读取 JSON 文本并导入为题库。
+        用户操作：在文件管理器里打开 JSON → 全选复制 → 回到应用点此按钮。
+        """
+        try:
+            from PySide6.QtGui import QGuiApplication
+            cb = QGuiApplication.clipboard()
+            if cb is None:
+                self.errorOccurred.emit("无法访问剪贴板")
+                return 0
+            text = cb.text()
+        except Exception as e:
+            self.errorOccurred.emit("读取剪贴板失败：{}".format(e))
+            return 0
+
+        if not text or not text.strip():
+            self.errorOccurred.emit(
+                "剪贴板为空。\n\n"
+                "请先用手机的「文件管理」打开 JSON 文件，"
+                "全选内容并复制，再回到应用点击此菜单。"
+            )
+            return 0
+
+        return self._import_json_text(text, source_name="clipboard")
+
+    @Slot(str, result=int)
+    def importFromText(self, text):
+        """从传入的文本导入 JSON 题库（供将来可能的 UI 调用）。"""
+        return self._import_json_text(text, source_name="manual")
+
+    def _import_json_text(self, text, source_name="imported"):
+        """
+        解析 JSON 文本，保存到应用私有目录并加载。
+        返回成功加载的题目数量；失败返回 0。
+        """
+        import json
+        import datetime
+
+        if not text or not text.strip():
+            self.errorOccurred.emit("内容为空")
+            return 0
+
+        # 清理 BOM 和前后空白
+        if text.startswith("\ufeff"):
+            text = text[1:]
+        text = text.strip()
+
+        # 先验证 JSON 是否有效
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as e:
+            self.errorOccurred.emit(
+                "JSON 格式错误：{}\n\n"
+                "请确认复制了完整的文件内容（从第一个 [ 到最后一个 ]）。".format(e)
+            )
+            return 0
+
+        if not isinstance(parsed, list):
+            self.errorOccurred.emit(
+                "JSON 格式不正确：顶层应该是数组（[]）。\n"
+                "请确认复制的是题库文件本身，而不是其他内容。"
+            )
+            return 0
+
+        if len(parsed) == 0:
+            self.errorOccurred.emit("JSON 数组为空，没有题目。")
+            return 0
+
+        # 生成目标路径
+        watch_dir = self._get_watch_dir()
+        name = "题库_{}_{}.json".format(
+            source_name,
+            datetime.datetime.now().strftime("%Y%m%d_%H%M%S"),
+        )
+        target_path = os.path.join(watch_dir, name)
+
+        # 规范化保存（重新序列化，统一格式）
+        try:
+            with open(target_path, "w", encoding="utf-8") as f:
+                json.dump(parsed, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.errorOccurred.emit("保存导入文件失败：{}".format(e))
+            return 0
+
+        # 加载
+        try:
+            with open(target_path, "r", encoding="utf-8") as f:
+                count = self._controller.load_from_json_file(f)
+        except Exception as e:
+            self.errorOccurred.emit("加载失败：{}".format(e))
+            return 0
+
+        if count > 0:
+            self._controller.current_file_path = target_path
+            self._controller.is_modified = False
+
+        self._refresh()
+        if count == 0:
+            self.errorOccurred.emit(
+                "该文件不包含有效题目数据。\n\n"
+                "请确认 JSON 里的题目字段（type / stem / options / answer）格式正确。"
+            )
+        else:
+            self.infoMessage.emit("已导入 {} 道题".format(count))
+        return count
+
+    # ==============================================================
+    # 从剪贴板追加题目（增量导入）
+    # ==============================================================
+    @Slot(result=int)
+    def appendFromClipboard(self):
+        """
+        从系统剪贴板读取 JSON 文本，追加到当前题库（按题目 id 去重）。
+        用于分多次导入大题库：每次粘贴一部分。
+        """
+        try:
+            from PySide6.QtGui import QGuiApplication
+            cb = QGuiApplication.clipboard()
+            if cb is None:
+                self.errorOccurred.emit("无法访问剪贴板")
+                return -1
+            text = cb.text()
+        except Exception as e:
+            self.errorOccurred.emit("读取剪贴板失败：{}".format(e))
+            return -1
+
+        if not text or not text.strip():
+            self.errorOccurred.emit(
+                "剪贴板为空。\n\n"
+                "请先用手机的「文件管理」打开 JSON 文件，"
+                "全选内容并复制，再回到应用点击此菜单。"
+            )
+            return -1
+
+        return self._append_json_text(text)
+
+    def _append_json_text(self, text):
+        """
+        解析 JSON 文本，按 id 去重后追加到当前题库，保存并重新加载。
+        返回本次新增的题目数量；失败返回 -1。
+        """
+        import json
+        import datetime
+
+        if not text or not text.strip():
+            self.errorOccurred.emit("内容为空")
+            return -1
+
+        if text.startswith("\ufeff"):
+            text = text[1:]
+        text = text.strip()
+
+        # 解析 JSON 语法
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as e:
+            self.errorOccurred.emit(
+                "JSON 格式错误：{}\n\n"
+                "请确认复制了完整的文件内容（从第一个 [ 到最后一个 ]）。".format(e)
+            )
+            return -1
+
+        if not isinstance(parsed, list):
+            self.errorOccurred.emit("JSON 格式不正确：顶层应该是数组（[]）。")
+            return -1
+
+        if len(parsed) == 0:
+            self.errorOccurred.emit("JSON 数组为空，没有题目。")
+            return -1
+
+        # 用 DataManager 解析为 Question 对象（复用已有逻辑，保证字段兼容）
+        try:
+            new_questions = self._controller.data_manager.load_from_json_file(
+                io.BytesIO(text.encode("utf-8"))
+            )
+        except Exception as e:
+            self.errorOccurred.emit("解析题库失败：{}".format(e))
+            return -1
+
+        if not new_questions:
+            self.errorOccurred.emit("没有解析到有效题目。")
+            return -1
+
+        # 拿到现有 master_list（可能为 None，表示当前没有题库）
+        existing = []
+        if self._controller.engine and self._controller.engine.master_list:
+            existing = self._controller.engine.master_list
+
+        existing_ids = {q.id for q in existing}
+        added = [q for q in new_questions if q.id not in existing_ids]
+
+        if not added:
+            self.infoMessage.emit(
+                "本次没有新增题目（{} 道题已存在）。".format(len(new_questions))
+            )
+            return 0
+
+        merged = list(existing) + added
+
+        # 决定保存路径：优先复用当前文件，没有则新建
+        target_path = self._controller.current_file_path
+        if not target_path:
+            watch_dir = self._get_watch_dir()
+            target_path = os.path.join(
+                watch_dir,
+                "题库_{}.json".format(
+                    datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                ),
+            )
+
+        # 保存合并后的完整题库
+        try:
+            self._controller.data_manager.save_to_json_file(target_path, merged)
+        except Exception as e:
+            self.errorOccurred.emit("保存失败：{}".format(e))
+            return -1
+
+        # 重新加载
+        try:
+            count = self._controller.load_from_json_file(target_path)
+        except Exception as e:
+            self.errorOccurred.emit("重新加载失败：{}".format(e))
+            return -1
+
+        self._refresh()
+        self.infoMessage.emit(
+            "本次新增 {} 道题，题库共 {} 道题".format(len(added), count)
+        )
+        return len(added)
