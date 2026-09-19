@@ -190,21 +190,6 @@ if [ "$CMD" = "pyside" ]; then
     pip install buildozer cython virtualenv
     pip list | grep -i -E "pyside|shiboken|buildozer"
     which pyside6-android-deploy
-
-    # ---------- 修补 buildozer.py：注入 pyjnius ----------
-    # pyside6-android-deploy 会把 buildozer.spec 的 requirements 硬编码为
-    # "python3,shiboken6,PySide6"，忽略 pysidedeploy.spec 里的任何配置。
-    # 这里直接修改这个硬编码值，让 p4a 编译 pyjnius recipe。
-    BUILDOZER_PY="$VIRTUAL_ENV/lib/python3.11/site-packages/PySide6/scripts/deploy_lib/android/buildozer.py"
-    if [ -f "$BUILDOZER_PY" ]; then
-        sed -i 's/"python3,shiboken6,PySide6"/"python3,shiboken6,PySide6,pyjnius"/' "$BUILDOZER_PY"
-        echo "已注入 pyjnius 到 buildozer.py"
-        grep -n 'requirements' "$BUILDOZER_PY" | head -5
-    else
-        echo "!!! 未找到 buildozer.py: $BUILDOZER_PY"
-        find "$VIRTUAL_ENV" -name "buildozer.py" -path "*deploy_lib*" 2>/dev/null || true
-    fi
-
     exit 0
 fi
 
