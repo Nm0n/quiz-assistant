@@ -122,8 +122,6 @@ ApplicationWindow {
         verticalAlignment: Text.AlignBottom
     }
 
-    
-
     // ============================================================
     // 桌面端文件对话框
     // ============================================================
@@ -171,7 +169,6 @@ ApplicationWindow {
     // ============================================================
     // 延迟打开对话框的 Timer
     // ============================================================
-    
     Timer {
         id: openFileDialogTimer
         property var targetDialog: null
@@ -225,8 +222,10 @@ ApplicationWindow {
     function openFilePicker() {
         console.log("[MainMenu] openFilePicker platform=" + Qt.platform.os)
         if (appWindow.isAndroidPlatform) {
+            // Android：走原生 Intent（依赖 pyjnius，当前可能不可用）
             bridge.openFilePickerAndroid()
         } else {
+            // 桌面：使用系统 FileDialog
             openFileDialogTimer.targetDialog = openJsonDialog
             openFileDialogTimer.start()
         }
@@ -243,7 +242,6 @@ ApplicationWindow {
             openFileDialogTimer.targetDialog = openJsonDialog
             openFileDialogTimer.start()
         }
-        
     }
 
     // ============================================================
@@ -307,6 +305,22 @@ ApplicationWindow {
                 onClicked: {
                     menuDrawer.close()
                     appWindow.openFilePicker()
+                }
+            }
+            MenuEntry {
+                width: menuColumn.width
+                label: "📋 从剪贴板导入题库"
+                onClicked: {
+                    menuDrawer.close()
+                    bridge.importFromClipboard()
+                }
+            }
+            MenuEntry {
+                width: menuColumn.width
+                label: "➕ 追加题目（从剪贴板）"
+                onClicked: {
+                    menuDrawer.close()
+                    bridge.appendFromClipboard()
                 }
             }
             MenuEntry {
