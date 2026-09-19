@@ -28,7 +28,3 @@ class ControllerBridge(FileOpsMixin, QuizOpsMixin, AndroidStorageMixin, ViewStat
         self._init_quiz_ops()
         self._init_android_storage()
         self._init_view_state()
-        # 在 Android 上注册文件选择器回调
-        from platform_utils import is_android
-        if is_android():
-            self._init_android_file_picker()
