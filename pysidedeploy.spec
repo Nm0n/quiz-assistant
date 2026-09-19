@@ -22,6 +22,6 @@ jars_dir =
 arch = arm64-v8a
 mode = debug
 local_libs = 
-requirements = PySide6, pyjnius
+requirements = PySide6
 ndk_path = /usr/local/lib/android/sdk/ndk/27.2.12479018
 sdk_path = /usr/local/lib/android/sdk
